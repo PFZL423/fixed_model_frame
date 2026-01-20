@@ -1,0 +1,15 @@
+# Super Voxel Clustering Configuration
+
+# Topics
+input_topic: "/camera/rgb/points" # 输入点云话题
+output_topic: "/supervoxel_cloud" # 输出带标签点云话题
+
+# Super Voxel Parameters
+voxel_resolution: 0.04 # 体素分辨率 (m) - 控制细节程度
+seed_resolution: 0.15 # 种子分辨率 (m) - 控制超体素大小
+color_importance: 0.2 # 颜色重要性 (0.0-1.0)
+spatial_importance: 0.4 # 空间重要性 (0.0-1.0)
+normal_importance: 1.0 # 法向量重要性 (0.0-1.0)
+
+# Performance
+enable_visualization: true # 是否启用凸包可视化

@@ -1,0 +1,16 @@
+<!-- 
+  启动节点2：二次曲面检测节点
+  先启动这个节点，等待节点1的数据
+-->
+<launch>
+    <!-- 节点2: 二次曲面检测 -->
+    <node pkg="PlaneDetect" type="interface_test_node" name="quadric_detect_node" output="screen">
+        <!-- 从配置文件加载参数 -->
+        <rosparam file="$(find PlaneDetect)/config/plane_detection.yaml" command="load"/>
+        
+        <!-- 订阅队列大小设为1，确保最小延迟 -->
+        <param name="queue_size" value="1"/>
+    </node>
+
+    <node type="rviz" name="rviz" pkg="rviz" args="-d $(find PlaneDetect)/rviz/plane_detection.rviz" />
+</launch>

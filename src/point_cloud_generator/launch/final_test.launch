@@ -1,0 +1,15 @@
+<launch>
+    <!-- 节点和参数的命名空间 -->
+    <arg name="node_namespace" default="detector"/>
+
+    <!-- 1. 加载参数文件                                                    -->
+
+    <rosparam command="load" file="$(find point_cloud_generator)/config/detector_params.yaml" ns="$(arg node_namespace)"/>
+
+    <!-- 2. 运行检测器节点                                                  -->
+    <node pkg="point_cloud_generator" type="final_test_node" name="quadric_detector" output="screen" ns="$(arg node_namespace)">
+        <!-- 也可以在这里覆盖单个参数，用于快速调试 -->
+        <!-- <param name="plane_detection/distance_threshold" value="0.03"/> -->
+    </node>
+
+</launch>

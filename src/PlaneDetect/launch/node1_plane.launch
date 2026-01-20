@@ -1,0 +1,14 @@
+<!-- 
+  启动节点1：平面检测和超体素节点
+  需要先启动 node2_quadric.launch，然后再启动这个
+-->
+<launch>
+    <!-- 节点1: 平面检测 + 超体素 -->
+    <node pkg="PlaneDetect" type="plane_test_node" name="plane_supervoxel_node" output="screen">
+        <!-- 从配置文件加载参数 -->
+        <rosparam file="$(find PlaneDetect)/config/plane_detection.yaml" command="load"/>
+        
+        <!-- 订阅队列大小设为1，确保最小延迟 -->
+        <param name="queue_size" value="1"/>
+    </node>
+</launch>

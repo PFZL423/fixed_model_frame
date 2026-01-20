@@ -1,0 +1,65 @@
+<launch>
+  <!-- ========================================
+       GPU二次曲面检测器测试启动文件
+       订阅/generated_cloud话题，输出二次曲面检测结果
+       ======================================== -->
+  
+  <!-- 参数文件路径 -->
+  <arg name="config_file" default="$(find gpu_demo)/config/quadric_detector_params.yaml"/>
+  
+  <!-- 是否启用调试输出 -->
+  <arg name="debug" default="false"/>
+  
+  <!-- 点云话题名称 (可通过命令行覆盖) -->
+  <arg name="input_topic" default="/generated_cloud"/>
+  
+  <!-- ========================================
+       核心检测节点
+       ======================================== -->
+  <node name="quadric_detector_test" 
+        pkg="gpu_demo" 
+        type="demo_test" 
+        output="screen"
+        required="true">
+    
+    <!-- 加载参数文件 -->
+    <rosparam file="$(arg config_file)" command="load"/>
+    
+    <!-- 可通过命令行参数覆盖的关键参数 -->
+    <param name="quadric_detector/input_topic" value="$(arg input_topic)"/>
+    <param name="quadric_detector/debug/verbosity" value="2" if="$(arg debug)"/>
+    <param name="quadric_detector/debug/verbosity" value="1" unless="$(arg debug)"/>
+    
+    <!-- GPU相关参数 -->
+    <param name="quadric_detector/gpu/batch_size" value="1024"/>
+    <param name="quadric_detector/gpu/max_detection_iterations" value="10"/>
+    
+    <!-- 输出控制 -->
+    <param name="quadric_detector/output/frame_id" value="base_link"/>
+    <param name="quadric_detector/debug/print_model_details" value="true"/>
+    
+  </node>
+  
+  <!-- ========================================
+       可选：点云可视化节点 (用于调试)
+       ======================================== -->
+  <group if="$(arg debug)">
+    <node name="rviz_quadric_viewer" 
+          pkg="rviz" 
+          type="rviz" 
+          args="-d $(find gpu_demo)/config/quadric_detection.rviz"
+          output="screen"
+          required="false"/>
+  </group>
+  
+  <!-- ========================================
+       参数打印 (启动时显示配置)
+       ======================================== -->
+  <node name="param_dumper" 
+        pkg="rosbag" 
+        type="rosbag" 
+        args="info --yaml --key=quadric_detector"
+        output="screen"
+        if="$(arg debug)"/>
+
+</launch>

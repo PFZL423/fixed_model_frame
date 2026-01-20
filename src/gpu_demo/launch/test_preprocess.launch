@@ -1,0 +1,20 @@
+<launch>
+    <!-- GPU预处理器测试节点 -->
+    <node name="gpu_preprocessor_test" 
+          pkg="gpu_demo" 
+          type="test_preprocess_node" 
+          output="screen"
+          
+          >
+        
+        <!-- 从yaml文件加载参数 -->
+        <rosparam file="$(find gpu_demo)/config/preprocess_params.yaml" command="load" />
+        
+        <!-- 可以在这里覆盖特定参数 -->
+        <!-- <param name="preprocess_config/voxel_size" value="0.03" /> -->
+        
+    </node>
+    
+    
+    
+</launch>

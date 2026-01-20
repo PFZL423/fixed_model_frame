@@ -1,0 +1,72 @@
+# PlaneDetect配置参数
+# 体素降采样参数
+enable_voxel_filter: true # 是否启用体素降采样
+voxel_leaf_size: 0.02 # 体素大小 (m)
+
+# 离群点移除参数
+enable_outlier_removal: false # 是否启用离群点移除
+outlier_k_neighbors: 50 # 统计离群点移除的K近邻数量
+outlier_std_dev_thresh: 1.0 # 标准差倍数阈值
+
+# 话题和坐标系参数
+input_topic: "/camera/depth_registered/points" # 输入点云话题
+output_frame: "camera_rgb_optical_frame" # 输出坐标系
+
+# ========== Plane Visualization (Aesthetics) ==========
+# 配色方案：pastel（粉彩，默认）| hsv（高饱和）| tab10（离散调色板）
+plane_color_scheme: "pastel"
+# 是否对平面三角网格应用棋盘式交替着色，增强纹理感
+plane_checkerboard: true
+# 平面透明度 [0,1]
+plane_alpha: 0.65
+# 可视化网格密度（越大越细，20≈默认，建议范围 8~60）
+plane_grid_size: 24
+
+# 是否将平面网格裁剪到内点的凸包区域（更贴合真实边界）
+plane_clip_to_hull: true
+# 凸包边缘轻度平滑系数 [0,1]（越大越圆润，0 表示不平滑）
+plane_hull_smooth_factor: 0.15
+# 凸包外扩（米），让边缘不那么“顶”在内点边界上
+plane_hull_padding: 0.02
+
+# PlaneDetect算法核心参数
+min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
+plane_distance_threshold: 0.12 # 平面内点距离阈值 (m)
+min_plane_inlier_count_absolute: 4000 # 有效模型的最小内点数(绝对值)
+plane_max_iterations: 2000 # RANSAC最大迭代次数
+min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
+batch_size: 128 # GPU批处理大小
+verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+
+# ========== Supervoxel Processing ==========
+enable_supervoxel: true # 是否启用超体素处理（默认关闭，测试时设为 true）
+min_remaining_points_for_supervoxel: 500 # 最小点数阈值
+
+# ========== Visualization Toggles ==========
+enable_visualization: true
+enable_plane_visualization: true
+enable_convex_hull_visualization: true
+enable_quadric_visualization: true
+
+# ========== Quadric Detection ==========
+enable_quadric: false # 是否启用二次曲面检测
+min_remaining_points_for_quadric: 500 # 二次曲面检测的最小点数阈值
+
+# QuadricDetect算法参数
+quadric_min_remaining_points_percentage: 0.1 # 剩余点数阈值(相对于总点数)
+quadric_distance_threshold: 0.08 # 二次曲面内点距离阈值 (m)
+min_quadric_inlier_count_absolute: 1000 # 有效模型的最小内点数(绝对值)
+quadric_max_iterations: 5000 # RANSAC最大迭代次数
+min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
+quadric_verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+
+# Supervoxel算法参数
+sv_voxel_resolution: 0.1 # 体素分辨率 (m)
+sv_seed_resolution: 0.3 # 种子分辨率 (m)
+sv_color_importance: 0.2 # 颜色权重
+sv_spatial_importance: 0.4 # 空间权重
+sv_normal_importance: 1.0 # 法向量权重
+sv_enable_voxel_downsample: false # 超体素预处理降采样
+sv_downsample_leaf_size: 0.02
+sv_use_2d_convex_hull: true # 使用2D凸包
+sv_min_points_for_hull: 3 # 凸包最少点数

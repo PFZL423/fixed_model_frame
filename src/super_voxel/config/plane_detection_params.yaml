@@ -1,0 +1,31 @@
+# PlaneDetect算法参数配置
+plane_detection:
+  # 核心RANSAC参数
+  min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
+  plane_distance_threshold: 0.02 # 平面内点距离阈值(米)
+  min_plane_inlier_count_absolute: 100 # 有效模型的最小内点数(绝对值)
+  plane_max_iterations: 2000 # RANSAC最大迭代次数
+  min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
+
+  # Batch-RANSAC参数
+  batch_size: 2048 # 每批次处理的样本数量
+
+  # 调试和输出控制
+  verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+
+# 超体素分割参数
+supervoxel:
+  voxel_resolution: 0.008 # 体素分辨率
+  seed_resolution: 0.08 # 种子分辨率
+  color_importance: 0.2 # 颜色重要性
+  spatial_importance: 0.4 # 空间重要性
+  normal_importance: 1.0 # 法向量重要性
+  enable_voxel_downsample: false # 是否启用体素下采样
+  downsample_leaf_size: 0.01 # 下采样叶子大小
+  use_2d_convex_hull: true # 使用2D凸包
+
+# 可视化参数
+visualization:
+  plane_size: 1.0 # 平面可视化大小(米)
+  plane_transparency: 0.6 # 平面透明度
+  convex_hull_line_width: 0.02 # 凸包线宽

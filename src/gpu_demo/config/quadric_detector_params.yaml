@@ -1,0 +1,90 @@
+# GPU二次曲面检测器参数配置文件
+# ========================================
+# ROS节点配置
+# ========================================
+quadric_detector:
+  # 订阅话题配置
+  input_topic: "/generated_cloud"
+  input_queue_size: 10
+
+  # 发布话题配置 (可选)
+  output_topic_prefix: "/quadric_detector"
+  publish_inliers: true
+  publish_remaining_cloud: true
+
+  # ========================================
+  # 核心RANSAC参数
+  # ========================================
+  ransac:
+    # 剩余点数阈值(相对于总点数，0.03表示3%)
+    min_remaining_points_percentage: 0.03
+
+    # 二次曲面内点距离阈值(米)
+    quadric_distance_threshold: 0.02
+
+    # 有效模型的最小内点数(绝对值)
+    min_quadric_inlier_count_absolute: 500
+
+    # RANSAC最大迭代次数
+    quadric_max_iterations: 5000
+
+    # 有效模型的最小内点比例(0.05表示5%)
+    min_quadric_inlier_percentage: 0.05
+
+  # ========================================
+  # LO-RANSAC局部优化参数 (暂未实现)
+  # ========================================
+  lo_ransac:
+    # 是否启用LO-RANSAC精炼
+    enable_local_optimization: false
+
+    # 触发局部优化的最小内点比例
+    lo_min_inlier_ratio: 0.6
+
+    # RANSAC成功概率目标
+    desired_prob: 0.99
+
+    # 局部优化采样点数
+    lo_sample_size: 15
+
+  # ========================================
+  # GPU计算参数
+  # ========================================
+  gpu:
+    # 批量处理大小 (1024是GPU线程块的倍数，性能最优)
+    batch_size: 1024
+
+    # 最大检测迭代次数(防止无限循环)
+    max_detection_iterations: 10
+
+    # CUDA流数量(并行计算)
+    cuda_streams: 1
+
+  # ========================================
+  # 调试和输出控制
+  # ========================================
+  debug:
+    # 详细输出级别 (0=静默, 1=正常, 2=详细)
+    verbosity: 2
+
+    # 是否保存中间结果
+    save_intermediate_results: false
+
+    # 是否输出性能统计
+    enable_timing: true
+
+    # 是否输出模型参数详情
+    print_model_details: true
+
+  # ========================================
+  # 输出格式控制
+  # ========================================
+  output:
+    # 二次曲面类型分类显示
+    classify_quadric_types: true
+
+    # 坐标系
+    frame_id: "base_link"
+
+    # 数值输出精度
+    decimal_precision: 6

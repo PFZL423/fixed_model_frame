@@ -1,0 +1,35 @@
+# 与 launch 中 node 名称空间对应
+detector:
+  # --- 1. 预处理参数 (Preprocessing) ---
+  preprocessing:
+    leaf_size_x: 0.05
+    leaf_size_y: 0.05
+    leaf_size_z: 0.05
+    use_outlier_removal: true
+    sor_mean_k: 50
+    sor_stddev_mul_thresh: 1.0
+
+  # --- 2. 平面检测参数 (RANSAC for Planes) ---
+  plane_detection:
+    max_iterations: 1000
+    distance_threshold: 0.02
+    min_inlier_percentage: 0.10
+
+  # --- 3. 二次曲面检测参数 (RANSAC for Quadrics) ---
+  quadric_detection:
+    max_iterations: 2000 # 显卡性能越好可以加大
+    distance_threshold: 1.5 # 越小拟合越严格，但可能漏检
+    min_inlier_percentage: 0.05
+    min_quadric_inlier_count_absolute: 500
+
+  # --- 4. 主循环控制参数 ---
+  main_loop:
+    min_remaining_points_percentage: 0.03
+
+  # --- 5.LO-RANSAC控制参数 ---
+  lo_ransac:
+    enable_local_optimization: true # 开局就开LO
+    lo_min_inlier_ratio: 0.6 # 内点比例大于此值触发局部优化
+    desired_prob: 0.99 # 成功概率
+    lo_sample_size: 15 # 局部优化采样点数
+    verbosity: 1 # 控制打印，0=关, 1=简略, 2=详细

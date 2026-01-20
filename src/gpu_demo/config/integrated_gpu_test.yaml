@@ -1,0 +1,36 @@
+# 完整GPU流水线测试参数配置
+# 适用于gpu_check_node（集成预处理+检测）
+
+# 输入配置
+input_topic: "/generated_cloud"
+max_points: 3200 # 最大处理点数
+
+# GPU预处理参数
+preprocess:
+  # 体素下采样
+  voxel_size: 0.08 # 体素大小 (米)
+
+  # 法线计算 (关闭以提高性能)
+  compute_normals: true
+
+  # 离群点移除
+  enable_outlier_removal: true
+  radius_search: 0.05 # 半径搜索距离
+  min_radius_neighbors: 5 # 最小邻居数
+
+# 二次曲面检测参数
+detector:
+  # RANSAC核心参数
+  min_remaining_points_percentage: 0.03 # 最小剩余点比例 (3%)
+  quadric_distance_threshold: 0.02 # 内点距离阈值 (2cm)
+  min_quadric_inlier_count_absolute: 200 # 最小内点数
+  quadric_max_iterations: 5000 # 最大迭代次数
+
+  # 输出控制
+  verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+
+# 性能优化提示:
+# - 减小voxel_size可以保留更多细节，但会增加计算量
+# - 增大quadric_distance_threshold可以检测到更粗糙的表面
+# - 减小min_quadric_inlier_count_absolute可以检测更小的表面
+# - 关闭compute_normals可以显著提高预处理速度

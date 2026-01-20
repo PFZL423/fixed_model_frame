@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 完整GPU流水线测试启动文件 -->
+    
+    <!-- 参数加载 -->
+    <rosparam file="$(find gpu_demo)/config/integrated_gpu_test.yaml" command="load" ns="integrated_gpu_test_node" />
+    
+    <!-- GPU集成测试节点 -->
+    <node name="integrated_gpu_test_node" 
+          pkg="gpu_demo" 
+          type="gpu_check_node" 
+          output="screen"
+          launch-prefix="">
+        
+        <!-- 节点特定参数 (覆盖YAML中的设置) -->
+        <!-- <param name="input_topic" value="/custom_cloud" /> -->
+        <!-- <param name="detector/verbosity" value="2" /> -->
+        
+        <!-- 🎯 性能分析模式：显示详细计时信息 -->
+        <param name="detector/verbosity" value="1" />
+        
+    </node>
+    
+    <!-- 可选：启动点云生成器 (如果需要测试数据) -->
+    <!-- 
+    <include file="$(find point_cloud_generator)/launch/demo_node.launch">
+        <arg name="output_topic" value="/generated_cloud" />
+    </include>
+    -->
+    
+</launch>

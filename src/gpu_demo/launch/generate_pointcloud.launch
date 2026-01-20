@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- RGBD数据转点云脚本启动文件 -->
+    
+    <!-- 参数配置 -->
+    <arg name="input_bag" default="$(find gpu_demo)/data/input.bag" />
+    <arg name="output_bag" default="$(find gpu_demo)/data/output-points.bag" />
+    <arg name="start_time" default="0.0" />
+    <arg name="duration" default="" />
+    <arg name="nth_frame" default="15" />
+    <arg name="skip_blocks" default="1" />
+    <arg name="compress" default="false" />
+    
+    <!-- 生成点云脚本 -->
+    <node name="generate_pointcloud" 
+          pkg="gpu_demo" 
+          type="generate_pointcloud.py" 
+          output="screen"
+          args="--start $(arg start_time) --nth $(arg nth_frame) --skip $(arg skip_blocks) $(arg input_bag) $(arg output_bag)">
+        
+        <!-- 添加压缩选项 -->
+        <param name="compress" value="$(arg compress)" if="$(arg compress)" />
+        
+        <!-- 添加持续时间选项 -->
+        <param name="duration" value="$(arg duration)" if="$(eval arg('duration') != '')" />
+        
+    </node>
+    
+    <!-- 使用说明 -->
+    <node name="usage_info" pkg="gpu_demo" type="echo" output="screen" 
+          args=" RGBD Point Cloud Generator Started!
+                 Input bag: $(arg input_bag)
+                 Output bag: $(arg output_bag)
+                  Processing every $(arg nth_frame)-th frame
+                 Usage: roslaunch gpu_demo generate_pointcloud.launch input_bag:=/path/to/your.bag" />
+    
+</launch>

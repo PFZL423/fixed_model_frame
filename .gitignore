@@ -1,0 +1,36 @@
+# --- ROS 常用过滤 ---
+devel/
+build/
+install/
+logs/
+.catkin_workspace
+.catkin_tools/
+# 如果是使用 colcon 编译
+log/
+
+# --- C++ 编译与二进制 ---
+*.o
+*.so
+*.a
+*.out
+/bin/
+/lib/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# --- CUDA 相关 ---
+*.i
+*.ii
+*.cubin
+*.fatbin
+*.ptx
+*.hash
+*.cuda-prof-raw
+
+# --- 编辑器配置 ---
+.vscode/
+.idea/
+.DS_Store
+*.bag

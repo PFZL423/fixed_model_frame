@@ -1,0 +1,14 @@
+<launch>
+    <!-- 节点名称和类型 -->
+    <arg name="node_name" default="Point_cloud_preprocessor_node"/>
+    <arg name="node_type" default="test_preprocess_node"/>
+
+    <!-- 配置文件路径 -->
+    <arg name="config_file" default="$(find point_cloud_generator)/config/pre_process_config.yaml"/>
+
+    <!-- 启动节点-->
+    <node pkg="point_cloud_generator" type="$(arg node_type)" name="$(arg node_name)" output="screen">
+        <!-- 从YAML文件加载参数到该节点的私有命名空间 -->
+        <rosparam file="$(arg config_file)" command="load"/>
+    </node>
+</launch>

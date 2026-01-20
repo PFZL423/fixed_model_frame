@@ -1,0 +1,32 @@
+# 二次曲面与平面检测器 - 参数配置文件
+
+# 由ROS的<rosparam>标签加载到参数服务器
+
+# 命名空间与launch文件中的<node>或<group>的ns属性对应
+detector:
+  # --- 1. 预处理参数 (Preprocessing) ---
+  # 这些参数将传递给 PointCloudPreprocessor 类
+  preprocessing:
+    leaf_size_x: 0.05
+    leaf_size_y: 0.05
+    leaf_size_z: 0.05
+    use_outlier_removal: true
+    sor_mean_k: 50
+    sor_stddev_mul_thresh: 1.0
+
+  # --- 2. 平面检测参数 (RANSAC for Planes) ---
+  plane_detection:
+    max_iterations: 1000
+    distance_threshold: 0.02
+    min_inlier_percentage: 0.10
+
+  # --- 3. 二次曲面检测参数 (RANSAC for Quadrics) ---
+  quadric_detection:
+    max_iterations: 2000
+    distance_threshold: 0.7
+    min_inlier_percentage: 0.05
+    voting_bin_size: 0.1
+
+  # --- 4. 主循环控制参数 ---
+  main_loop:
+    min_remaining_points_percentage: 0.03

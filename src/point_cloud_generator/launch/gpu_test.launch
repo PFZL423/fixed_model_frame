@@ -1,0 +1,16 @@
+<launch>
+  <!-- 用 GDB 调试 gpu_test_node -->
+  <node name="gpu_test_node"
+        pkg="point_cloud_generator"
+        type="gpu_test_node"
+        output="screen"
+        launch-prefix="gdb -ex run --args"
+        >
+        
+    <!-- 加载 YAML 配置 -->
+    <rosparam command="load"
+              file="$(find point_cloud_generator)/config/detector_gpu.yaml"
+              ns="detector" />
+              
+  </node>
+</launch>

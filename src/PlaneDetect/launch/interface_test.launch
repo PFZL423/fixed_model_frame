@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- Interface Test Node: 极简一条龙测试 -->
+    <node name="interface_test" pkg="PlaneDetect" type="interface_test_node" output="screen">
+        <!-- 加载配置文件 -->
+        <rosparam command="load" file="$(find PlaneDetect)/config/plane_detection.yaml"/>
+    </node>
+</launch>

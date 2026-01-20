@@ -1,0 +1,35 @@
+<launch>
+    <node pkg="point_cloud_generator" 
+          type="pc_generator_finished" 
+          name="point_cloud_generator_node" 
+          output="screen">
+
+        <param name="quadric_count" value="4" />
+
+        <!-- 曲面 1 -->
+        <param name="coefficients_1" type="string" value="0.0 0.0 0.0 0 0 0 1 2 3 -1"/>
+        <param name="num_points_1" value="3000" />
+        <param name="offset_1" type="string" value="0 0 0" />
+
+        <!-- 曲面 2 -->
+        <param name="coefficients_2" type="string" value="0.0 0.0 0.0 0 0 0 1 1 3 -2"/>
+        <param name="num_points_2" value="2000" />
+        <param name="offset_2" type="string" value="0 0 0" />
+
+        <!-- 曲面 3 -->
+        <param name="coefficients_3" type="string" value="0.0 0.0 0.0 0 0 0 5 3 2 -2"/>
+        <param name="num_points_3" value="2000" />
+        <param name="offset_3" type="string" value="0 0 0" />
+
+        <!-- 曲面 4 -->
+        <param name="coefficients_4" type="string" value="0.0 0.0 0.0 0 0 0 4 3 2 -2"/>
+        <param name="num_points_4" value="2000" />
+        <param name="offset_4" type="string" value="0 0 0" />
+        <!-- 全局参数 -->
+        <param name="bounding_box_size" value="3.0" />
+        <param name="tolerance" value="0.05" />
+        <param name="noise_std_dev" value="0.01" />
+        <param name="num_outliers" value="200" />
+
+    </node>
+</launch>

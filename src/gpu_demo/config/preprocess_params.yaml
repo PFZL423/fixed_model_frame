@@ -1,0 +1,42 @@
+# GPU预处理器参数配置
+gpu_preprocessor:
+  # 输入输出话题
+  input_topic: "/generated_cloud"
+  output_topic: "/processed_cloud"
+
+  # 预处理配置
+  preprocess_config:
+    # 体素下采样 (当前测试功能)
+    enable_voxel_filter: true
+    voxel_size: 0.2 # 增大到20cm体素大小，减少点云密度
+
+    # 额外下采样选项
+    enable_uniform_sampling: false # 均匀下采样开关
+    uniform_sampling_ratio: 3 # 每N个点取1个 (1=不下采样, 2=取一半, 3=取1/3)
+
+    # 离群点移除 (暂时关闭)
+    enable_outlier_removal: false
+    outlier_method: 0 # 0=STATISTICAL, 1=RADIUS
+    statistical_k: 50
+    statistical_stddev: 1.0
+    radius_search: 0.1
+    min_radius_neighbors: 5
+
+    # 法线计算 (暂时关闭)
+    compute_normals: false
+    normal_radius: 0.1
+    normal_k: 20
+
+    # 地面移除 (暂时关闭)
+    enable_ground_removal: false
+    ground_threshold: 0.02
+
+  # 性能配置
+  memory:
+    max_points: 10000 # 预分配内存：100万点
+
+  # 发布配置
+  publisher:
+    queue_size: 1
+    latch: true # 锁存发布
+    frame_id: "base_link" # 根据你的实际frame调整

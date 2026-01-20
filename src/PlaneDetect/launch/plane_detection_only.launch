@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 参数定义 -->
+    <arg name="config_file" default="$(find PlaneDetect)/config/plane_detection.yaml" />
+    <arg name="launch_rviz" default="true" />
+    
+    <!-- 平面检测节点 -->
+    <node name="plane_detection_node" pkg="PlaneDetect" type="plane_test_node" output="screen">
+        <!-- 从YAML文件加载参数 -->
+        <rosparam file="$(arg config_file)" command="load" />
+    </node>
+    
+    <!-- 启动RViz可视化 (可选) -->
+    <node if="$(arg launch_rviz)" name="rviz" pkg="rviz" type="rviz" 
+          args="-d $(find PlaneDetect)/config/plane_detection.rviz" 
+          output="screen" />
+          
+    <!-- 静态变换发布器 -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="map_to_base_link"
+          args="0 0 0 0 0 0 map base_link" />
+</launch>

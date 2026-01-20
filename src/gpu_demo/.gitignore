@@ -1,0 +1,64 @@
+# Build directories
+build/
+devel/
+install/
+logs/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+compile_commands.json
+
+# Object and library files
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+
+# CUDA compiled files
+*.ptx
+*.cubin
+*.fatbin
+
+# Executable files
+*.out
+demo_test
+gpu_check
+test_main
+test_preprocess
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ROS specific
+*.bag
+*.orig
+*.rej
+
+# Debug files
+*.gdb_history
+core
+vgcore.*
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Python bytecode (if any Python scripts are added later)
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*.bak
+*.backup

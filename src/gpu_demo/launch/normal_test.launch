@@ -1,0 +1,28 @@
+<launch>
+    <!-- 法线计算测试启动文件 -->
+    
+    <!-- 加载参数配置 -->
+    <rosparam file="$(find gpu_demo)/config/integrated_gpu_test.yaml" command="load" />
+    
+    <!-- 启动法线测试节点 -->
+    <node name="normal_test_node" pkg="gpu_demo" type="normal_test" output="screen">
+        <!-- 从yaml文件加载的参数会自动传递给节点 -->
+        
+        <!-- 额外的测试特定参数 -->
+        <param name="max_points" value="6000" />
+        
+        <!-- 重映射话题 -->
+        <remap from="/generated_cloud" to="/generated_cloud" />
+        <remap from="/processed_cloud" to="/normal_test/processed_cloud" />
+        <remap from="/normal_markers" to="/normal_test/normal_markers" />
+    </node>
+    
+    <!-- 可选：启动静态变换发布者 -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_publisher"
+          args="0 0 0 0 0 0 map base_link" />
+          
+    <!-- 输出信息 -->
+    <node name="launch_info" pkg="rostopic" type="rostopic" 
+          args="echo -p /normal_test/processed_cloud/header" output="screen" />
+
+</launch>
