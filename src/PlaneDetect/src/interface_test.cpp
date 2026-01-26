@@ -119,7 +119,7 @@ private:
                  msg->width * msg->height, msg->header.seq);
 
         // 转换为PCL格式
-        pcl::PointCloud<pcl::PointXYZRGB>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZI>);
         pcl::fromROSMsg(*msg, *input_cloud);
 
         if (input_cloud->empty())

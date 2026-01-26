@@ -10,7 +10,7 @@
 struct GPUPoint3f
 {
     float x, y, z;
-    u_int32_t rgb; // 32-bit packed RGB
+    float intensity; // 强度值（用于PointXYZI）
 };
 
 struct GPUPointNormal3f

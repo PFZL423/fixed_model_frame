@@ -147,15 +147,15 @@ private:
         
         try {
             // Step 1: 转换为PCL格式
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+            pcl::PointCloud<pcl::PointXYZI>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZI>);
             pcl::fromROSMsg(*msg, *input_cloud);
             
             ROS_INFO("[Step 1] PCL Conversion: %zu points", input_cloud->size());
             
             // Step 2: 体素下采样
             auto voxel_start = std::chrono::high_resolution_clock::now();
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr voxel_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-            pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
+            pcl::PointCloud<pcl::PointXYZI>::Ptr voxel_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+            pcl::VoxelGrid<pcl::PointXYZI> voxel_filter;
             voxel_filter.setInputCloud(input_cloud);
             voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
             voxel_filter.filter(*voxel_cloud);
@@ -167,8 +167,8 @@ private:
             
             // Step 3: 统计滤波去除离群点
             // auto sor_start = std::chrono::high_resolution_clock::now();
-            // pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-            // pcl::StatisticalOutlierRemoval<pcl::PointXYZRGB> sor;
+            // pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+            // pcl::StatisticalOutlierRemoval<pcl::PointXYZI> sor;
             // sor.setInputCloud(voxel_cloud);
             // sor.setMeanK(sor_mean_k_);
             // sor.setStddevMulThresh(sor_stddev_mul_thresh_);
@@ -220,7 +220,7 @@ private:
                 }
                 
                 // 获取剩余点云
-                pcl::PointCloud<pcl::PointXYZRGB>::Ptr remaining_cloud = quadric_detector_->getFinalCloud();
+                pcl::PointCloud<pcl::PointXYZI>::Ptr remaining_cloud = quadric_detector_->getFinalCloud();
                 ROS_INFO("\n📍 Remaining Points: %zu", remaining_cloud->size());
                 
             } else {

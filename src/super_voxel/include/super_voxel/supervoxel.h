@@ -18,13 +18,13 @@ namespace super_voxel {
 // 凸包数据结构
 struct ConvexHullData {
     uint32_t supervoxel_id;
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr hull_points;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr hull_points;
     std::vector<pcl::Vertices> polygons;
     size_t input_point_count;
     double computation_time_ms;
     
     ConvexHullData() : supervoxel_id(0), input_point_count(0), computation_time_ms(0.0) {
-        hull_points.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
+        hull_points.reset(new pcl::PointCloud<pcl::PointXYZI>);
     }
 };
 
@@ -68,7 +68,7 @@ struct ProcessingStats {
  */
 class SupervoxelProcessor {
 public:
-    using PointT = pcl::PointXYZRGB;
+    using PointT = pcl::PointXYZI;
     using PointCloudPtr = pcl::PointCloud<PointT>::Ptr;
     
     /**
@@ -105,7 +105,7 @@ public:
      * @brief 获取标记点云（按supervoxel上色）
      * @return 上色后的点云指针
      */
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr getColoredCloud() const;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr getColoredCloud() const;
     
     /**
      * @brief 清除所有处理结果
@@ -128,7 +128,7 @@ private:
     SupervoxelParams params_;
     std::vector<ConvexHullData> convex_hulls_;
     ProcessingStats stats_;
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr colored_cloud_;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr colored_cloud_;
     mutable std::mutex mutex_;
     
     // 内部处理方法

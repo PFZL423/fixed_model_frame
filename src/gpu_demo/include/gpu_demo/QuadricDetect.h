@@ -122,11 +122,11 @@ struct DetectedPrimitive
 {
     std::string type;                               ///< 几何体类型 ("quadric", "plane", etc.)
     Eigen::Matrix4f model_coefficients;            ///< 4x4二次曲面矩阵Q或平面参数
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr inliers;   ///< 属于该几何体的内点点云
+    pcl::PointCloud<pcl::PointXYZI>::Ptr inliers;   ///< 属于该几何体的内点点云
 
     DetectedPrimitive()
     {
-        inliers.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
+        inliers.reset(new pcl::PointCloud<pcl::PointXYZI>());
         model_coefficients.setZero();
     }
 };
@@ -161,7 +161,7 @@ public:
      * @param input_cloud 输入的PCL点云 (PointXYZRGB格式)
      * @return true表示处理成功，false表示输入无效或处理失败
      */
-    bool processCloud(const pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr &input_cloud);
+    bool processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr &input_cloud);
     bool processCloud(const thrust::device_vector<GPUPoint3f> &input_cloud);
 
     /**
@@ -174,14 +174,14 @@ public:
      * @brief 获取处理后的剩余点云
      * @return 移除所有检测到的几何体后的剩余点云
      */
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr getFinalCloud() const;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr getFinalCloud() const;
 
 private:
     // 添加这个新函数的声明
     void validateInversePowerResults(int batch_size);
     void outputBestModelDetails(const GPUQuadricModel &best_model, int inlier_count, int model_idx, int iteration);
 
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr extractInlierCloud() const;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr extractInlierCloud() const;
     // 🆕 添加到QuadricDetect.h的public部分
     void performBatchInversePowerIteration(int batch_size);
     void launchComputeATA(int batch_size);
@@ -233,7 +233,7 @@ private:
      * @brief 将PCL点云转换为GPU格式并上传
      * @param cloud 输入的PCL点云
      */
-    void convertPCLtoGPU(const pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr &cloud);
+    void convertPCLtoGPU(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr &cloud);
     
     /**
      * @brief 将GPU二次曲面模型转换为Eigen矩阵

@@ -53,7 +53,7 @@ private:
     ros::Publisher convex_hull_marker_pub_;  // 凸包可视化
     ros::Publisher result_cloud_pub_;      // 最终结果点云
 
-    std::unique_ptr<PlaneDetect<pcl::PointXYZRGB>> plane_detector_;
+    std::unique_ptr<PlaneDetect<pcl::PointXYZI>> plane_detector_;
     DetectorParams detector_params_;
 
     // 超体素处理器
@@ -179,7 +179,7 @@ private:
 
     void initializePlaneDetector()
     {
-        plane_detector_ = std::make_unique<PlaneDetect<pcl::PointXYZRGB>>(detector_params_);
+        plane_detector_ = std::make_unique<PlaneDetect<pcl::PointXYZI>>(detector_params_);
         ROS_INFO("PlaneDetector initialized with batch_size=%d", detector_params_.batch_size);
     }
 
@@ -229,7 +229,7 @@ private:
         ROS_INFO("Received point cloud with %d points", msg->width * msg->height);
 
         // 转换为PCL格式
-        pcl::PointCloud<pcl::PointXYZRGB>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZI>);
         pcl::fromROSMsg(*msg, *input_cloud);
 
         if (input_cloud->empty())
@@ -239,11 +239,11 @@ private:
         }
 
         // 体素降采样（可选）
-        pcl::PointCloud<pcl::PointXYZRGB>::Ptr processed_cloud = input_cloud;
+        pcl::PointCloud<pcl::PointXYZI>::Ptr processed_cloud = input_cloud;
         if (enable_voxel_filter_)
         {
-            processed_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
-            pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
+            processed_cloud.reset(new pcl::PointCloud<pcl::PointXYZI>);
+            pcl::VoxelGrid<pcl::PointXYZI> voxel_filter;
             voxel_filter.setInputCloud(input_cloud);
             voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
             voxel_filter.filter(*processed_cloud);
@@ -260,8 +260,8 @@ private:
         // 离群点移除（可选）
         if (enable_outlier_removal_)
         {
-            pcl::PointCloud<pcl::PointXYZRGB>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-            pcl::StatisticalOutlierRemoval<pcl::PointXYZRGB> outlier_filter;
+            pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+            pcl::StatisticalOutlierRemoval<pcl::PointXYZI> outlier_filter;
             outlier_filter.setInputCloud(processed_cloud);
             outlier_filter.setMeanK(outlier_k_neighbors_);
             outlier_filter.setStddevMulThresh(outlier_std_dev_thresh_);
@@ -363,7 +363,7 @@ private:
         }
         
         // 转换点云
-        pcl::PointCloud<pcl::PointXYZRGB>::Ptr quadric_remaining(new pcl::PointCloud<pcl::PointXYZRGB>);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr quadric_remaining(new pcl::PointCloud<pcl::PointXYZI>);
         pcl::fromROSMsg(*msg, *quadric_remaining);
         
         ROS_INFO("Points remaining after quadric detection: %zu", quadric_remaining->size());
@@ -404,7 +404,7 @@ private:
         ROS_INFO(" [Node1] Frame %u processing complete", msg->header.seq);
     }
 
-    void visualizePlanes(const std::vector<DetectedPrimitive<pcl::PointXYZRGB>> &planes,
+    void visualizePlanes(const std::vector<DetectedPrimitive<pcl::PointXYZI>> &planes,
                          const std_msgs::Header &header)
     {
         if (!(enable_visualization_ && enable_plane_visualization_)) return;
@@ -572,7 +572,7 @@ private:
         ROS_INFO("Published %zu plane markers", planes.size());
     }
 
-    void generatePlaneVisualization(const DetectedPrimitive<pcl::PointXYZRGB> &plane,
+    void generatePlaneVisualization(const DetectedPrimitive<pcl::PointXYZI> &plane,
                                     visualization_msgs::Marker &marker)
     {
         if (plane.inliers->empty())
@@ -691,7 +691,7 @@ private:
     }
 
     // 使用内点的2D凸包生成裁剪后的平面三角形网格。成功返回true。
-    bool generatePlaneVisualizationHull(const DetectedPrimitive<pcl::PointXYZRGB> &plane,
+    bool generatePlaneVisualizationHull(const DetectedPrimitive<pcl::PointXYZI> &plane,
                                         visualization_msgs::Marker &marker)
     {
         if (!plane.inliers || plane.inliers->size() < 3) return false;
@@ -820,7 +820,7 @@ private:
         return !marker.points.empty();
     }
 
-    void generateNormalVisualization(const DetectedPrimitive<pcl::PointXYZRGB> &plane,
+    void generateNormalVisualization(const DetectedPrimitive<pcl::PointXYZI> &plane,
                                      visualization_msgs::Marker &marker)
     {
         if (plane.inliers->empty())
@@ -904,7 +904,7 @@ private:
     }
 
     void publishRemainingCloud(const std_msgs::Header &header,
-                               const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &remaining_cloud)
+                               const pcl::PointCloud<pcl::PointXYZI>::Ptr &remaining_cloud)
     {
         if (remaining_cloud && !remaining_cloud->empty())
         {
@@ -919,7 +919,7 @@ private:
     }
 
     void processSupervoxels(const std_msgs::Header &header,
-                            const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &remaining_cloud)
+                            const pcl::PointCloud<pcl::PointXYZI>::Ptr &remaining_cloud)
     {
         // 使用传入的剩余点云进行超体素处理
         if (!remaining_cloud || remaining_cloud->empty())

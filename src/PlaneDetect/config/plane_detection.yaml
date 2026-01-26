@@ -1,7 +1,7 @@
 # PlaneDetect配置参数
 # 体素降采样参数
 enable_voxel_filter: true # 是否启用体素降采样
-voxel_leaf_size: 0.02 # 体素大小 (m)
+voxel_leaf_size: 0.1 # 体素大小 (m)
 
 # 离群点移除参数
 enable_outlier_removal: false # 是否启用离群点移除
@@ -9,8 +9,8 @@ outlier_k_neighbors: 50 # 统计离群点移除的K近邻数量
 outlier_std_dev_thresh: 1.0 # 标准差倍数阈值
 
 # 话题和坐标系参数
-input_topic: "/camera/depth_registered/points" # 输入点云话题
-output_frame: "camera_rgb_optical_frame" # 输出坐标系
+input_topic: "/livox/points" # 输入点云话题
+output_frame: "map" # 输出坐标系
 
 # ========== Plane Visualization (Aesthetics) ==========
 # 配色方案：pastel（粉彩，默认）| hsv（高饱和）| tab10（离散调色板）
@@ -32,37 +32,37 @@ plane_hull_padding: 0.02
 # PlaneDetect算法核心参数
 min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
 plane_distance_threshold: 0.12 # 平面内点距离阈值 (m)
-min_plane_inlier_count_absolute: 4000 # 有效模型的最小内点数(绝对值)
-plane_max_iterations: 2000 # RANSAC最大迭代次数
+min_plane_inlier_count_absolute: 40000 # 有效模型的最小内点数(绝对值)
+plane_max_iterations: 100 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
-batch_size: 128 # GPU批处理大小
+batch_size: 512 # GPU批处理大小
 verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
 
 # ========== Supervoxel Processing ==========
-enable_supervoxel: true # 是否启用超体素处理（默认关闭，测试时设为 true）
-min_remaining_points_for_supervoxel: 500 # 最小点数阈值
+enable_supervoxel: false # 是否启用超体素处理（默认关闭，测试时设为 true）
+min_remaining_points_for_supervoxel: 5000 # 最小点数阈值
 
 # ========== Visualization Toggles ==========
-enable_visualization: true
+enable_visualization: false
 enable_plane_visualization: true
 enable_convex_hull_visualization: true
 enable_quadric_visualization: true
 
 # ========== Quadric Detection ==========
 enable_quadric: false # 是否启用二次曲面检测
-min_remaining_points_for_quadric: 500 # 二次曲面检测的最小点数阈值
+min_remaining_points_for_quadric: 10000 # 二次曲面检测的最小点数阈值
 
 # QuadricDetect算法参数
 quadric_min_remaining_points_percentage: 0.1 # 剩余点数阈值(相对于总点数)
-quadric_distance_threshold: 0.08 # 二次曲面内点距离阈值 (m)
-min_quadric_inlier_count_absolute: 1000 # 有效模型的最小内点数(绝对值)
-quadric_max_iterations: 5000 # RANSAC最大迭代次数
+quadric_distance_threshold: 0.1 # 二次曲面内点距离阈值 (m)
+min_quadric_inlier_count_absolute: 3000 # 有效模型的最小内点数(绝对值)
+quadric_max_iterations: 500 # RANSAC最大迭代次数
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
-quadric_verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+quadric_verbosity: 0 # 详细输出级别 (0=静默, 1=正常, 2=详细)
 
 # Supervoxel算法参数
-sv_voxel_resolution: 0.1 # 体素分辨率 (m)
-sv_seed_resolution: 0.3 # 种子分辨率 (m)
+sv_voxel_resolution: 0.2 # 体素分辨率 (m)
+sv_seed_resolution: 0.8 # 种子分辨率 (m)
 sv_color_importance: 0.2 # 颜色权重
 sv_spatial_importance: 0.4 # 空间权重
 sv_normal_importance: 1.0 # 法向量权重

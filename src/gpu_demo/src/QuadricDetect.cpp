@@ -21,7 +21,7 @@ QuadricDetect::~QuadricDetect()
     cudaStreamDestroy(stream_);
 }
 
-bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr &input_cloud)
+bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr &input_cloud)
 {
     if (!input_cloud || input_cloud->empty())
         return false;
@@ -65,7 +65,7 @@ bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZRGB>::ConstP
     return true;
 }
 
-void QuadricDetect::convertPCLtoGPU(const pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr &cloud)
+void QuadricDetect::convertPCLtoGPU(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr &cloud)
 {
     auto total_start = std::chrono::high_resolution_clock::now();
 
@@ -83,7 +83,7 @@ void QuadricDetect::convertPCLtoGPU(const pcl::PointCloud<pcl::PointXYZRGB>::Con
             gpu_pt.x = pt.x;
             gpu_pt.y = pt.y;
             gpu_pt.z = pt.z;
-            gpu_pt.rgb = pt.rgb;  // 保存RGB信息
+            gpu_pt.intensity = pt.intensity;  // 保存强度信息
             h_points.push_back(gpu_pt);
         }
     }
@@ -215,7 +215,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
         total_extract_inliers_time += extract_inliers_time;
 
         // Step 8: 构建内点点云
-        pcl::PointCloud<pcl::PointXYZRGB>::Ptr inlier_cloud = extractInlierCloud();
+        pcl::PointCloud<pcl::PointXYZI>::Ptr inlier_cloud = extractInlierCloud();
 
         // Step 9: 保存检测结果
         DetectedPrimitive detected_quadric;
@@ -353,9 +353,9 @@ QuadricDetect::getDetectedPrimitives() const
     return detected_primitives_;
 }
 
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr QuadricDetect::getFinalCloud() const
+pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::getFinalCloud() const
 {
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr final_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
+    pcl::PointCloud<pcl::PointXYZI>::Ptr final_cloud(new pcl::PointCloud<pcl::PointXYZI>());
 
     // 🔧 关键修复：确保所有 GPU 操作完成后再复制数据到 Host
     cudaStreamSynchronize(stream_);
@@ -391,11 +391,11 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr QuadricDetect::getFinalCloud() const
     
     for (int idx : h_remaining_indices) {
         if (idx >= 0 && idx < h_all_points.size()) {
-            pcl::PointXYZRGB pt;
+            pcl::PointXYZI pt;
             pt.x = h_all_points[idx].x;
             pt.y = h_all_points[idx].y;
             pt.z = h_all_points[idx].z;
-            pt.rgb = h_all_points[idx].rgb;  // 恢复RGB信息
+            pt.intensity = h_all_points[idx].intensity;  // 恢复强度信息
             final_cloud->push_back(pt);
         }
     }
@@ -408,9 +408,9 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr QuadricDetect::getFinalCloud() const
     return final_cloud;
 }
 
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr QuadricDetect::extractInlierCloud() const
+pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
 {
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr inlier_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
+    pcl::PointCloud<pcl::PointXYZI>::Ptr inlier_cloud(new pcl::PointCloud<pcl::PointXYZI>());
 
     if (d_temp_inlier_indices_.empty() || current_inlier_count_ == 0)
     {
@@ -451,11 +451,11 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr QuadricDetect::extractInlierCloud() const
         int idx = h_inlier_indices[i];
         if (idx >= 0 && idx < h_all_points.size())
         {
-            pcl::PointXYZRGB pt;
+            pcl::PointXYZI pt;
             pt.x = h_all_points[idx].x;
             pt.y = h_all_points[idx].y;
             pt.z = h_all_points[idx].z;
-            pt.rgb = h_all_points[idx].rgb;  // 恢复RGB信息（关键！）
+            pt.intensity = h_all_points[idx].intensity;  // 恢复强度信息（关键！）
             inlier_cloud->push_back(pt);
         }
     }

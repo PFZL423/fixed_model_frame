@@ -8,7 +8,7 @@ namespace super_voxel {
 
 SupervoxelProcessor::SupervoxelProcessor(const SupervoxelParams& params) 
     : params_(params) {
-    colored_cloud_.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
+    colored_cloud_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 }
 
 bool SupervoxelProcessor::processPointCloud(const PointCloudPtr& input_cloud) {
@@ -125,15 +125,62 @@ bool SupervoxelProcessor::performSupervoxelSegmentation(
     std::map<uint32_t, pcl::Supervoxel<PointT>::Ptr>& supervoxel_clusters,
     pcl::PointCloud<pcl::PointXYZL>::Ptr& labeled_cloud) {
     
-    pcl::SupervoxelClustering<PointT> super(params_.voxel_resolution, params_.seed_resolution);
-    super.setInputCloud(cloud);
+    // 将 PointXYZI 转换为 PointXYZRGB（SupervoxelClustering 需要 RGB 类型）
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr rgb_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+    rgb_cloud->resize(cloud->size());
+    rgb_cloud->width = cloud->width;
+    rgb_cloud->height = cloud->height;
+    rgb_cloud->is_dense = cloud->is_dense;
+    rgb_cloud->header = cloud->header;
+    
+    for (size_t i = 0; i < cloud->size(); ++i) {
+        rgb_cloud->points[i].x = cloud->points[i].x;
+        rgb_cloud->points[i].y = cloud->points[i].y;
+        rgb_cloud->points[i].z = cloud->points[i].z;
+        
+        // 将 intensity 值映射到 RGB（方案1：使用 intensity 值）
+        float intensity = cloud->points[i].intensity;
+        uint8_t intensity_byte = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, intensity)));
+        rgb_cloud->points[i].r = intensity_byte;
+        rgb_cloud->points[i].g = intensity_byte;
+        rgb_cloud->points[i].b = intensity_byte;
+    }
+    
+    // 使用 PointXYZRGB 类型进行 SupervoxelClustering
+    pcl::SupervoxelClustering<pcl::PointXYZRGB> super(params_.voxel_resolution, params_.seed_resolution);
+    super.setInputCloud(rgb_cloud);
     super.setColorImportance(params_.color_importance);
     super.setSpatialImportance(params_.spatial_importance);
     super.setNormalImportance(params_.normal_importance);
     
+    // 提取 supervoxel（使用 RGB 类型）
+    std::map<uint32_t, pcl::Supervoxel<pcl::PointXYZRGB>::Ptr> rgb_supervoxel_clusters;
+    
     try {
-        super.extract(supervoxel_clusters);
+        super.extract(rgb_supervoxel_clusters);
         labeled_cloud = super.getLabeledCloud();
+        
+        // 将 RGB supervoxel 转换为 PointT 类型
+        supervoxel_clusters.clear();
+        for (const auto& kv : rgb_supervoxel_clusters) {
+            pcl::Supervoxel<PointT>::Ptr sv(new pcl::Supervoxel<PointT>);
+            sv->centroid_ = kv.second->centroid_;
+            sv->normal_ = kv.second->normal_;
+            sv->voxels_.reset(new pcl::PointCloud<PointT>);
+            sv->voxels_->resize(kv.second->voxels_->size());
+            for (size_t i = 0; i < kv.second->voxels_->size(); ++i) {
+                sv->voxels_->points[i].x = kv.second->voxels_->points[i].x;
+                sv->voxels_->points[i].y = kv.second->voxels_->points[i].y;
+                sv->voxels_->points[i].z = kv.second->voxels_->points[i].z;
+                // 从 RGB 恢复 intensity（取平均值）
+                uint8_t r = kv.second->voxels_->points[i].r;
+                uint8_t g = kv.second->voxels_->points[i].g;
+                uint8_t b = kv.second->voxels_->points[i].b;
+                sv->voxels_->points[i].intensity = static_cast<float>((r + g + b) / 3);
+            }
+            supervoxel_clusters[kv.first] = sv;
+        }
+        
         return true;
     } catch (const std::exception& e) {
         std::cerr << "Supervoxel extraction failed: " << e.what() << std::endl;
@@ -202,15 +249,14 @@ void SupervoxelProcessor::generateColoredCloud(const pcl::PointCloud<pcl::PointX
     colored_cloud_->points.resize(labeled_cloud->points.size());
     
     for (size_t i = 0; i < labeled_cloud->points.size(); ++i) {
-        pcl::PointXYZRGB& point = colored_cloud_->points[i];
+        pcl::PointXYZI& point = colored_cloud_->points[i];
         point.x = labeled_cloud->points[i].x;
         point.y = labeled_cloud->points[i].y;
         point.z = labeled_cloud->points[i].z;
         
         uint32_t label = labeled_cloud->points[i].label;
-        point.r = (label * 53) % 255;
-        point.g = (label * 97) % 255;
-        point.b = (label * 193) % 255;
+        // 使用 intensity 存储标签值（用于可视化）
+        point.intensity = static_cast<float>(label);
     }
 }
 
@@ -255,7 +301,7 @@ const ProcessingStats& SupervoxelProcessor::getProcessingStats() const {
     return stats_;
 }
 
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr SupervoxelProcessor::getColoredCloud() const {
+pcl::PointCloud<pcl::PointXYZI>::Ptr SupervoxelProcessor::getColoredCloud() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return colored_cloud_;
 }

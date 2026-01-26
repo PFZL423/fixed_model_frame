@@ -51,7 +51,7 @@ private:
     void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
     {
         // 转换点云
-        pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
         pcl::fromROSMsg(*msg, *cloud);
 
         if (cloud->empty()) {

@@ -478,6 +478,7 @@ void PlaneDetect<PointT>::launchRemovePointsKernel()
 
 // 显式模板实例化
 template class PlaneDetect<pcl::PointXYZ>;
-template class PlaneDetect<pcl::PointXYZI>;
-template class PlaneDetect<pcl::PointXYZRGB>;
-template class PlaneDetect<pcl::PointXYZRGBA>;
+template class PlaneDetect<pcl::PointXYZI>;  // 主要使用格式
+// 可选：保留其他格式
+// template class PlaneDetect<pcl::PointXYZRGB>;
+// template class PlaneDetect<pcl::PointXYZRGBA>;

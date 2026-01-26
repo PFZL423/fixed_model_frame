@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cmath>     // 添加这个头文件用于isfinite函数
 #include <algorithm> // 添加这个头文件用于min函数
+#include <stdexcept> // 用于 std::exception
 
 // ========================================
 // CUDA内核函数定义 (每个内核只定义一次!)
@@ -717,9 +718,57 @@ __global__ void removePointsKernel(
 // 包装函数
 void QuadricDetect::launchRemovePointsKernel()
 {
+    // 修复：添加边界检查，防止 radix_sort 错误
+    if (current_inlier_count_ <= 0)
+    {
+        if (params_.verbosity > 0)
+        {
+            std::cout << "[launchRemovePointsKernel] 跳过：内点数量为0" << std::endl;
+        }
+        return;
+    }
+    
+    if (current_inlier_count_ > static_cast<int>(d_temp_inlier_indices_.size()))
+    {
+        std::cerr << "[launchRemovePointsKernel] 错误：内点数量 (" << current_inlier_count_
+                  << ") 超出数组大小 (" << d_temp_inlier_indices_.size() << ")" << std::endl;
+        return;
+    }
+    
+    if (d_temp_inlier_indices_.empty())
+    {
+        std::cerr << "[launchRemovePointsKernel] 错误：内点索引数组为空" << std::endl;
+        return;
+    }
+    
+    // 确保之前的 CUDA 操作已完成
+    cudaError_t sync_error = cudaStreamSynchronize(stream_);
+    if (sync_error != cudaSuccess)
+    {
+        std::cerr << "[launchRemovePointsKernel] CUDA流同步错误: " 
+                  << cudaGetErrorString(sync_error) << std::endl;
+        return;
+    }
+    
     // 1. 对内点索引排序（纯GPU操作）
-    thrust::sort(d_temp_inlier_indices_.begin(),
-                 d_temp_inlier_indices_.begin() + current_inlier_count_);
+    try {
+        thrust::sort(d_temp_inlier_indices_.begin(),
+                     d_temp_inlier_indices_.begin() + current_inlier_count_);
+        
+        // 检查排序操作是否有错误
+        cudaError_t sort_error = cudaGetLastError();
+        if (sort_error != cudaSuccess)
+        {
+            std::cerr << "[launchRemovePointsKernel] 排序错误: " 
+                      << cudaGetErrorString(sort_error) << std::endl;
+            return;
+        }
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[launchRemovePointsKernel] 排序异常: " << e.what() << std::endl;
+        return;
+    }
 
     // 2. 分配输出空间
     thrust::device_vector<int> d_new_remaining(d_remaining_indices_.size());

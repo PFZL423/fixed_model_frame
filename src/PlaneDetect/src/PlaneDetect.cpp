@@ -6,6 +6,28 @@
 #include <cmath>
 #include <algorithm>
 #include <iomanip>
+
+// 辅助函数：获取点的强度值（如果存在）
+template<typename PointT>
+float getPointIntensity(const PointT& pt, std::true_type) {
+    return pt.intensity;
+}
+
+template<typename PointT>
+float getPointIntensity(const PointT& pt, std::false_type) {
+    return 0.0f;  // 对于没有intensity的点类型，返回0
+}
+
+// 检查点类型是否有intensity字段
+template<typename PointT>
+struct has_intensity {
+    template<typename T>
+    static auto test(int) -> decltype(std::declval<T>().intensity, std::true_type{});
+    template<typename>
+    static std::false_type test(...);
+    static constexpr bool value = decltype(test<PointT>(0))::value;
+};
+
 template <typename pointT>
 PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
 {
@@ -62,7 +84,8 @@ void PlaneDetect<PointT>::convertPCLtoGPU(const typename pcl::PointCloud<PointT>
 
     for (const auto &pt : cloud->points)
     {
-        h_points.push_back(GPUPoint3f{pt.x, pt.y, pt.z, pt.rgb});  // 保存RGB信息
+        float intensity_val = getPointIntensity(pt, std::integral_constant<bool, has_intensity<PointT>::value>{});
+        h_points.push_back(GPUPoint3f{pt.x, pt.y, pt.z, intensity_val});  // 保存强度信息
     }
     auto cpu_convert_end = std::chrono::high_resolution_clock::now();
     float cpu_convert_time = std::chrono::duration<float, std::milli>(cpu_convert_end - cpu_convert_start).count();
@@ -267,7 +290,9 @@ typename pcl::PointCloud<PointT>::Ptr PlaneDetect<PointT>::extractInlierCloud() 
             pt.x = h_all_points[idx].x;
             pt.y = h_all_points[idx].y;
             pt.z = h_all_points[idx].z;
-            pt.rgb = h_all_points[idx].rgb;  // 恢复RGB信息
+            if constexpr (has_intensity<PointT>::value) {
+                pt.intensity = h_all_points[idx].intensity;  // 恢复强度信息
+            }
             cloud->points.push_back(pt);
         }
     }
@@ -408,7 +433,9 @@ typename pcl::PointCloud<PointT>::Ptr PlaneDetect<PointT>::getFinalCloud() const
             point.x = h_all_points[idx].x;
             point.y = h_all_points[idx].y;  
             point.z = h_all_points[idx].z;
-            point.rgb = h_all_points[idx].rgb;  // 恢复RGB信息（关键！）
+            if constexpr (has_intensity<PointT>::value) {
+                point.intensity = h_all_points[idx].intensity;  // 恢复强度信息（关键！）
+            }
             final_cloud->points.push_back(point);
         }
     }
@@ -422,7 +449,6 @@ typename pcl::PointCloud<PointT>::Ptr PlaneDetect<PointT>::getFinalCloud() const
 }
 
 // 显式模板实例化
-// template class PlaneDetect<pcl::PointXYZ>;
-// template class PlaneDetect<pcl::PointXYZI>;
-template class PlaneDetect<pcl::PointXYZRGB>;
-template class PlaneDetect<pcl::PointXYZRGBA>;
+template class PlaneDetect<pcl::PointXYZI>;
+// 保留其他格式的实例化（如果需要）
+template class PlaneDetect<pcl::PointXYZ>;

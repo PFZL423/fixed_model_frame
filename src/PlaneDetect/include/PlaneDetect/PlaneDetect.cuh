@@ -90,7 +90,7 @@ __global__ void extractInliers_Kernel(
  * @brief 移除内点内核 - GPU并行点移除
  * @param remaining_points 当前剩余点索引
  * @param remaining_count 剩余点数量
- * @param sorted_inliers 已排序的内点索引
+ * @param inlier_indices 内点索引（不需要排序）
  * @param inlier_count 内点数量
  * @param output_points [out] 输出的新剩余点索引
  * @param output_count [out] 输出的新剩余点数量
@@ -98,7 +98,7 @@ __global__ void extractInliers_Kernel(
 __global__ void removePointsKernel(
     const int *remaining_points,
     int remaining_count,
-    const int *sorted_inliers,
+    const int *inlier_indices,
     int inlier_count,
     int *output_points,
     int *output_count);
