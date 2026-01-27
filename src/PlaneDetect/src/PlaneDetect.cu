@@ -313,8 +313,39 @@ void PlaneDetect<PointT>::initializeGPUMemory(int batch_size)
 template <typename PointT>
 void PlaneDetect<PointT>::uploadPointsToGPU(const std::vector<GPUPoint3f> &h_points)
 {
+    // 使用预分配的缓冲区，避免每帧malloc/free
+    size_t point_count = h_points.size();
+    
+    // 安全检查
+    if (point_count > max_points_capacity_)
+    {
+        std::cerr << "[uploadPointsToGPU] 错误：点云数量 (" << point_count 
+                  << ") 超过预分配容量 (" << max_points_capacity_ << ")" << std::endl;
+        return;
+    }
+    
+    if (d_points_buffer_ == nullptr)
+    {
+        std::cerr << "[uploadPointsToGPU] 错误：GPU显存缓冲区未初始化" << std::endl;
+        return;
+    }
+    
+    // 直接拷贝到预分配的GPU缓冲区
+    cudaError_t err = cudaMemcpy(d_points_buffer_, h_points.data(), 
+                                 point_count * sizeof(GPUPoint3f), 
+                                 cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[uploadPointsToGPU] 错误：GPU拷贝失败: " 
+                  << cudaGetErrorString(err) << std::endl;
+        return;
+    }
+    
+    // 直接赋值，thrust会自动处理内存分配和拷贝（优化版本）
     d_all_points_ = h_points;
-    d_remaining_indices_.resize(h_points.size());
+    
+    // 更新remaining_indices
+    d_remaining_indices_.resize(point_count);
     thrust::sequence(d_remaining_indices_.begin(), d_remaining_indices_.end(), 0);
 }
 

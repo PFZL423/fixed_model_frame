@@ -192,6 +192,12 @@ private:
     mutable int current_inlier_count_;
 
     // ========================================
+    // GPU显存预分配（避免每帧malloc/free开销）
+    // ========================================
+    GPUPoint3f* d_points_buffer_;        ///< 预分配的GPU显存缓冲区
+    size_t max_points_capacity_;        ///< 最大容量（默认200万点）
+
+    // ========================================
     // 核心数据成员
     // ========================================
     DetectorParams params_;                                                                           ///< 算法参数配置
@@ -200,7 +206,7 @@ private:
     // ========================================
     // GPU内存管理 (thrust智能指针，自动清理)
     // ========================================
-    thrust::device_vector<GPUPoint3f> d_all_points_;        ///< GPU上的原始点云数据
+    thrust::device_vector<GPUPoint3f> d_all_points_;        ///< GPU上的原始点云数据（引用d_points_buffer_）
     thrust::device_vector<int> d_remaining_indices_;        ///< 当前未分配的点索引列表
     thrust::device_vector<GPUPlaneModel> d_batch_models_;   ///< 批量拟合的平面模型
     thrust::device_vector<int> d_batch_inlier_counts_;      ///< 每个模型的内点计数

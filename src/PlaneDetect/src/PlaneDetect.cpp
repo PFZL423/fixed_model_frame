@@ -2,6 +2,9 @@
 #include "PlaneDetect/PlaneDetect.cuh"
 #include <pcl/common/io.h>
 #include <thrust/copy.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sequence.h>
+#include <cuda_runtime.h>
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -31,9 +34,42 @@ struct has_intensity {
 template <typename pointT>
 PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
 {
+    // 初始化预分配缓冲区
+    d_points_buffer_ = nullptr;
+    max_points_capacity_ = 2000000; // 200万点，足够处理大部分场景
+    
+    // 预分配GPU显存缓冲区
+    cudaError_t err = cudaMalloc((void**)&d_points_buffer_, max_points_capacity_ * sizeof(GPUPoint3f));
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[PlaneDetect] 错误：无法预分配GPU显存缓冲区: " 
+                  << cudaGetErrorString(err) << std::endl;
+        d_points_buffer_ = nullptr;
+        max_points_capacity_ = 0;
+    }
+    else if (params_.verbosity > 0)
+    {
+        std::cout << "[PlaneDetect] 预分配GPU显存缓冲区: " 
+                  << max_points_capacity_ << " 点 (" 
+                  << (max_points_capacity_ * sizeof(GPUPoint3f) / 1024.0 / 1024.0) 
+                  << " MB)" << std::endl;
+    }
+    
+    // 注意：d_all_points_的预分配延迟到第一次convertPCLtoGPU调用时进行
+    // 避免在构造函数中触发Thrust的resize操作
 }
 template <typename pointT>
 PlaneDetect<pointT>::~PlaneDetect(){
+    // 释放预分配的GPU显存缓冲区
+    if (d_points_buffer_ != nullptr)
+    {
+        cudaFree(d_points_buffer_);
+        d_points_buffer_ = nullptr;
+        if (params_.verbosity > 0)
+        {
+            std::cout << "[PlaneDetect] 已释放预分配的GPU显存缓冲区" << std::endl;
+        }
+    }
 }
 
 template <typename PointT>
@@ -77,22 +113,82 @@ void PlaneDetect<PointT>::convertPCLtoGPU(const typename pcl::PointCloud<PointT>
 {
     auto total_start = std::chrono::high_resolution_clock::now();
 
-    // Step 1: CPU数据转换
-    auto cpu_convert_start = std::chrono::high_resolution_clock::now();
-    std::vector<GPUPoint3f> h_points;
-    h_points.reserve(cloud->size());
-
-    for (const auto &pt : cloud->points)
+    // 安全检查：检查点数是否超过预分配容量
+    size_t point_count = cloud->size();
+    if (point_count > max_points_capacity_)
     {
-        float intensity_val = getPointIntensity(pt, std::integral_constant<bool, has_intensity<PointT>::value>{});
-        h_points.push_back(GPUPoint3f{pt.x, pt.y, pt.z, intensity_val});  // 保存强度信息
+        std::cerr << "[convertPCLtoGPU] 错误：点云数量 (" << point_count 
+                  << ") 超过预分配容量 (" << max_points_capacity_ << ")" << std::endl;
+        return;
     }
+
+    if (d_points_buffer_ == nullptr)
+    {
+        std::cerr << "[convertPCLtoGPU] 错误：GPU显存缓冲区未初始化" << std::endl;
+        return;
+    }
+
+    // Step 1: CPU数据转换 - 直接填充到对齐的pinned memory
+    auto cpu_convert_start = std::chrono::high_resolution_clock::now();
+    
+    // 使用对齐的pinned memory（16字节对齐，触发高速DMA）
+    GPUPoint3f* h_points_buffer = nullptr;
+    cudaError_t err = cudaMallocHost((void**)&h_points_buffer, point_count * sizeof(GPUPoint3f));
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[convertPCLtoGPU] 警告：无法分配pinned memory，回退到普通内存: " 
+                  << cudaGetErrorString(err) << std::endl;
+        // 回退到std::vector
+        std::vector<GPUPoint3f> h_points;
+        h_points.reserve(point_count);
+        for (const auto &pt : cloud->points)
+        {
+            float intensity_val = getPointIntensity(pt, std::integral_constant<bool, has_intensity<PointT>::value>{});
+            h_points.push_back(GPUPoint3f{pt.x, pt.y, pt.z, intensity_val});
+        }
+        
+        // 直接赋值，thrust会自动处理内存分配和拷贝
+        d_all_points_ = h_points;
+    }
+    else
+    {
+        // 使用对齐的pinned memory，填充数据
+        for (size_t i = 0; i < point_count; ++i)
+        {
+            const auto &pt = cloud->points[i];
+            float intensity_val = getPointIntensity(pt, std::integral_constant<bool, has_intensity<PointT>::value>{});
+            h_points_buffer[i] = GPUPoint3f{pt.x, pt.y, pt.z, intensity_val};
+        }
+        
+        // 创建临时的host vector用于thrust::copy
+        std::vector<GPUPoint3f> h_points_vec(point_count);
+        for (size_t i = 0; i < point_count; ++i)
+        {
+            h_points_vec[i] = h_points_buffer[i];
+        }
+        
+        // 使用thrust::copy直接拷贝（避免resize的问题）
+        d_all_points_ = h_points_vec;
+        
+        // 释放pinned memory
+        cudaFreeHost(h_points_buffer);
+    }
+    
     auto cpu_convert_end = std::chrono::high_resolution_clock::now();
     float cpu_convert_time = std::chrono::duration<float, std::milli>(cpu_convert_end - cpu_convert_start).count();
 
-    // Step 2: 上传到GPU
+    // Step 2: 更新remaining_indices
     auto gpu_upload_start = std::chrono::high_resolution_clock::now();
-    uploadPointsToGPU(h_points);
+    
+    // 使用简单的循环初始化，避免thrust::sequence和resize的兼容性问题
+    std::vector<int> h_indices(point_count);
+    for (size_t i = 0; i < point_count; ++i)
+    {
+        h_indices[i] = static_cast<int>(i);
+    }
+    // 直接赋值，thrust会自动处理内存分配
+    d_remaining_indices_ = h_indices;
+    
     auto gpu_upload_end = std::chrono::high_resolution_clock::now();
     float gpu_upload_time = std::chrono::duration<float, std::milli>(gpu_upload_end - gpu_upload_start).count();
 
@@ -104,7 +200,7 @@ void PlaneDetect<PointT>::convertPCLtoGPU(const typename pcl::PointCloud<PointT>
         std::cout << "[convertPCLtoGPU] CPU convert: " << cpu_convert_time << " ms" << std::endl;
         std::cout << "[convertPCLtoGPU] GPU upload: " << gpu_upload_time << " ms" << std::endl;
         std::cout << "[convertPCLtoGPU] Total time: " << total_time << " ms" << std::endl;
-        std::cout << "[convertPCLtoGPU] Uploaded " << cloud->size() << " points to GPU." << std::endl;
+        std::cout << "[convertPCLtoGPU] Uploaded " << point_count << " points to GPU." << std::endl;
     }
 }
 

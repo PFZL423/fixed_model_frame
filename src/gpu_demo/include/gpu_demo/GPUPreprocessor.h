@@ -11,6 +11,7 @@ struct GPUPoint3f
 {
     float x, y, z;
     float intensity; // 强度值（用于PointXYZI）
+    // 4个float正好16字节，自然对齐，满足CUDA内存对齐要求
 };
 
 struct GPUPointNormal3f
