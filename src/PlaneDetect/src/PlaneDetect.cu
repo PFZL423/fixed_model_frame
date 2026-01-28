@@ -352,7 +352,43 @@ void PlaneDetect<PointT>::initializeGPUMemory(int batch_size)
 }
 
 template <typename PointT>
-void PlaneDetect<PointT>::uploadPointsToGPU(const std::vector<GPUPoint3f> &h_points)
+void PlaneDetect<PointT>::uploadPointsToGPU(const GPUPoint3f* h_points, size_t point_count)
+{
+    // 安全检查
+    if (point_count > max_points_capacity_)
+    {
+        std::cerr << "[uploadPointsToGPU] 错误：点云数量 (" << point_count 
+                  << ") 超过预分配容量 (" << max_points_capacity_ << ")" << std::endl;
+        return;
+    }
+    
+    if (d_points_buffer_ == nullptr || stream_ == nullptr)
+    {
+        std::cerr << "[uploadPointsToGPU] 错误：GPU显存缓冲区或CUDA流未初始化" << std::endl;
+        return;
+    }
+    
+    // 异步拷贝到预分配的GPU缓冲区（使用流隔离，不阻塞其他操作）
+    cudaError_t err = cudaMemcpyAsync(d_points_buffer_, h_points, 
+                                      point_count * sizeof(GPUPoint3f), 
+                                      cudaMemcpyHostToDevice, stream_);
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[uploadPointsToGPU] 错误：GPU异步拷贝失败: " 
+                  << cudaGetErrorString(err) << std::endl;
+        return;
+    }
+    
+    // 设置当前点数量
+    current_point_count_ = point_count;
+    
+    // 更新remaining_indices（在CPU端完成，不阻塞GPU流）
+    d_remaining_indices_.resize(point_count);
+    thrust::sequence(d_remaining_indices_.begin(), d_remaining_indices_.end(), 0);
+}
+
+template <typename PointT>
+void PlaneDetect<PointT>::uploadPointsToGPU(const thrust::device_vector<GPUPoint3f> &h_points)
 {
     // 使用预分配的缓冲区，避免每帧malloc/free
     size_t point_count = h_points.size();
@@ -365,27 +401,28 @@ void PlaneDetect<PointT>::uploadPointsToGPU(const std::vector<GPUPoint3f> &h_poi
         return;
     }
     
-    if (d_points_buffer_ == nullptr)
+    if (d_points_buffer_ == nullptr || stream_ == nullptr)
     {
-        std::cerr << "[uploadPointsToGPU] 错误：GPU显存缓冲区未初始化" << std::endl;
+        std::cerr << "[uploadPointsToGPU] 错误：GPU显存缓冲区或CUDA流未初始化" << std::endl;
         return;
     }
     
-    // 直接拷贝到预分配的GPU缓冲区
-    cudaError_t err = cudaMemcpy(d_points_buffer_, h_points.data(), 
-                                 point_count * sizeof(GPUPoint3f), 
-                                 cudaMemcpyHostToDevice);
+    // 异步拷贝到预分配的GPU缓冲区（device-to-device拷贝，使用流隔离）
+    cudaError_t err = cudaMemcpyAsync(d_points_buffer_, 
+                                      thrust::raw_pointer_cast(h_points.data()), 
+                                      point_count * sizeof(GPUPoint3f), 
+                                      cudaMemcpyDeviceToDevice, stream_);
     if (err != cudaSuccess)
     {
-        std::cerr << "[uploadPointsToGPU] 错误：GPU拷贝失败: " 
+        std::cerr << "[uploadPointsToGPU] 错误：GPU异步拷贝失败: " 
                   << cudaGetErrorString(err) << std::endl;
         return;
     }
     
-    // 直接赋值，thrust会自动处理内存分配和拷贝（优化版本）
-    d_all_points_ = h_points;
+    // 设置当前点数量
+    current_point_count_ = point_count;
     
-    // 更新remaining_indices
+    // 更新remaining_indices（在CPU端完成，不阻塞GPU流）
     d_remaining_indices_.resize(point_count);
     thrust::sequence(d_remaining_indices_.begin(), d_remaining_indices_.end(), 0);
 }
@@ -416,7 +453,7 @@ void PlaneDetect<PointT>::launchSampleAndFitPlanes(int batch_size)
     dim3 grid((batch_size + block.x - 1) / block.x);
 
     sampleAndFitPlanes_Kernel<<<grid, block>>>(
-        thrust::raw_pointer_cast(d_all_points_.data()),
+        d_points_buffer_,
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
         d_valid_mask_,  // 新增：传入掩码
@@ -435,7 +472,7 @@ void PlaneDetect<PointT>::launchCountInliersBatch(int batch_size)
     thrust::fill(d_batch_inlier_counts_.begin(), d_batch_inlier_counts_.end(), 0);
 
     countInliersBatch_Kernel<<<grid, block>>>(
-        thrust::raw_pointer_cast(d_all_points_.data()),
+        d_points_buffer_,
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
         d_valid_mask_,  // 新增：传入掩码
@@ -477,7 +514,7 @@ void PlaneDetect<PointT>::launchExtractInliers(const GPUPlaneModel *model)
     dim3 grid((d_remaining_indices_.size() + block.x - 1) / block.x);
 
     extractInliers_Kernel<<<grid, block>>>(
-        thrust::raw_pointer_cast(d_all_points_.data()),
+        d_points_buffer_,
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
         d_valid_mask_,  // 新增：传入掩码
@@ -551,15 +588,17 @@ struct IsValidPoint {
 };
 
 template <typename PointT>
-void PlaneDetect<PointT>::compactValidPoints(thrust::device_vector<GPUPoint3f> &output_points) const
+int PlaneDetect<PointT>::downloadCompactPoints(GPUPoint3f* h_out_buffer) const
 {
-    if (d_points_buffer_ == nullptr || d_valid_mask_ == nullptr || d_all_points_.empty())
+    if (d_points_buffer_ == nullptr || d_valid_mask_ == nullptr || stream_ == nullptr || current_point_count_ == 0)
     {
-        output_points.clear();
-        return;
+        return 0;
     }
 
-    size_t point_count = d_all_points_.size();
+    // 流同步：确保所有异步操作完成后再下载
+    cudaStreamSynchronize(stream_);
+
+    size_t point_count = current_point_count_;
     
     // 使用thrust::copy_if根据掩码提取有效点
     thrust::device_vector<GPUPoint3f> temp_points(point_count);
@@ -578,20 +617,36 @@ void PlaneDetect<PointT>::compactValidPoints(thrust::device_vector<GPUPoint3f> &
     
     // 计算实际有效点数量
     int valid_count = thrust::distance(temp_points.begin(), end_it);
-    temp_points.resize(valid_count);
     
-    output_points = std::move(temp_points);
+    if (valid_count > 0)
+    {
+        // 直接下载到CPU缓冲区（同步拷贝，因为需要立即使用数据）
+        cudaError_t err = cudaMemcpy(
+            h_out_buffer,
+            thrust::raw_pointer_cast(temp_points.data()),
+            valid_count * sizeof(GPUPoint3f),
+            cudaMemcpyDeviceToHost);
+        
+        if (err != cudaSuccess)
+        {
+            std::cerr << "[downloadCompactPoints] 错误：GPU拷贝失败: " 
+                      << cudaGetErrorString(err) << std::endl;
+            return 0;
+        }
+    }
+    
+    return valid_count;
 }
 
 template <typename PointT>
 int PlaneDetect<PointT>::countValidPoints() const
 {
-    if (d_valid_mask_ == nullptr || d_all_points_.empty())
+    if (d_valid_mask_ == nullptr || current_point_count_ == 0)
     {
         return 0;
     }
     
-    size_t point_count = d_all_points_.size();
+    size_t point_count = current_point_count_;
     thrust::device_ptr<uint8_t> d_mask_ptr = thrust::device_pointer_cast(d_valid_mask_);
     
     // 使用thrust::count统计掩码为1的点数

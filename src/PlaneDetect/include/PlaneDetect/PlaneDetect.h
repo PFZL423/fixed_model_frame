@@ -197,6 +197,9 @@ private:
     GPUPoint3f* d_points_buffer_;        ///< 预分配的GPU显存缓冲区
     uint8_t* d_valid_mask_;              ///< 点云有效性掩码（1=有效，0=已移除）
     size_t max_points_capacity_;        ///< 最大容量（默认200万点）
+    size_t current_point_count_;        ///< 当前点云数量（替代d_all_points_.size()）
+    GPUPoint3f* h_pinned_buffer_;       ///< CPU端锁页内存缓冲区（预分配，DMA直接访问，避免驱动层拷贝）
+    cudaStream_t stream_;               ///< CUDA流，用于异步操作和流隔离
 
     // ========================================
     // 核心数据成员
@@ -207,7 +210,6 @@ private:
     // ========================================
     // GPU内存管理 (thrust智能指针，自动清理)
     // ========================================
-    thrust::device_vector<GPUPoint3f> d_all_points_;        ///< GPU上的原始点云数据（引用d_points_buffer_）
     thrust::device_vector<int> d_remaining_indices_;        ///< 当前未分配的点索引列表
     thrust::device_vector<GPUPlaneModel> d_batch_models_;   ///< 批量拟合的平面模型
     thrust::device_vector<int> d_batch_inlier_counts_;      ///< 每个模型的内点计数
@@ -246,10 +248,11 @@ private:
     void initializeGPUMemory(int batch_size);
 
     /**
-     * @brief 上传点云数据到GPU并初始化索引
-     * @param h_points CPU端的点云数据
+     * @brief 上传点云数据到GPU并初始化索引（异步，使用流隔离）
+     * @param h_points CPU端的点云数据（锁页内存）
+     * @param point_count 点云数量
      */
-    void uploadPointsToGPU(const std::vector<GPUPoint3f> &h_points);
+    void uploadPointsToGPU(const GPUPoint3f* h_points, size_t point_count);
     void uploadPointsToGPU(const thrust::device_vector<GPUPoint3f> &h_points);
 
     /**
@@ -308,11 +311,12 @@ private:
     void launchRemovePointsKernel();
 
     /**
-     * @brief 压缩有效点云 - 根据掩码提取有效点
-     * 使用thrust::copy_if进行最后一键提取，必须在.cu文件中实现
-     * @param output_points [out] 输出的紧凑点云
+     * @brief 下载紧凑点云到CPU缓冲区 - 避免ABI不一致
+     * 在.cu内部完成copy_if，然后直接下载到CPU缓冲区
+     * @param h_out_buffer CPU端输出缓冲区（必须预分配足够空间）
+     * @return 实际下载的有效点数量
      */
-    void compactValidPoints(thrust::device_vector<GPUPoint3f> &output_points) const;
+    int downloadCompactPoints(GPUPoint3f* h_out_buffer) const;
 
     /**
      * @brief 计算有效点数量 - 根据掩码统计

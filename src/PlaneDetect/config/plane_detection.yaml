@@ -54,11 +54,11 @@ min_remaining_points_for_quadric: 10000 # 二次曲面检测的最小点数阈�
 
 # QuadricDetect算法参数
 quadric_min_remaining_points_percentage: 0.1 # 剩余点数阈值(相对于总点数)
-quadric_distance_threshold: 0.1 # 二次曲面内点距离阈值 (m)
+quadric_distance_threshold: 0.15 # 二次曲面内点距离阈值 (m)
 min_quadric_inlier_count_absolute: 3000 # 有效模型的最小内点数(绝对值)
-quadric_max_iterations: 500 # RANSAC最大迭代次数
+quadric_max_iterations: 300 # RANSAC最大迭代次数（降低负载）
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
-quadric_verbosity: 0 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+quadric_verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
 
 # Supervoxel算法参数
 sv_voxel_resolution: 0.2 # 体素分辨率 (m)

@@ -59,7 +59,10 @@ bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr
     cudaDeviceSynchronize();
     
     if (params_.verbosity > 0) {
-        std::cout << "[QuadricDetect] Total: " << total_time << " ms" << std::endl;
+        std::cout << "[QuadricDetect] Timing breakdown:" << std::endl;
+        std::cout << "  PCL->GPU convert: " << convert_time << " ms" << std::endl;
+        std::cout << "  Quadric detection: " << detect_time << " ms" << std::endl;
+        std::cout << "  Total: " << total_time << " ms" << std::endl;
     }
 
     return true;
@@ -99,7 +102,12 @@ void QuadricDetect::convertPCLtoGPU(const pcl::PointCloud<pcl::PointXYZI>::Const
     auto total_end = std::chrono::high_resolution_clock::now();
     float total_time = std::chrono::duration<float, std::milli>(total_end - total_start).count();
 
-    // 详细输出已移除，只在verbosity > 1时显示
+    if (params_.verbosity > 1)
+    {
+        std::cout << "[QuadricDetect] PCL转换时间: " << cpu_convert_time << " ms" << std::endl;
+        std::cout << "[QuadricDetect] GPU上传时间: " << gpu_upload_time << " ms" << std::endl;
+        std::cout << "[QuadricDetect] 转换总时间: " << total_time << " ms" << std::endl;
+    }
 }
 
 Eigen::Matrix4f QuadricDetect::convertGPUModelToEigen(const GPUQuadricModel &gpu_model)
@@ -117,7 +125,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
     auto total_detect_start = std::chrono::high_resolution_clock::now();
 
     const int batch_size = 1024;
-    const int max_iterations = 10;
+    const int max_iterations = 3;  // 降低主循环迭代次数，避免剩余点数少时空转
 
     // Step 1: 初始化GPU内存
     auto init_start = std::chrono::high_resolution_clock::now();
@@ -133,8 +141,9 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
     if (params_.verbosity > 0)
     {
-        std::cout << "[findQuadrics_BatchGPU] 开始检测，总点数: " << d_all_points_.size()
+        std::cout << "[QuadricDetect] 开始检测，总点数: " << d_all_points_.size()
                   << ", 最小剩余点数: " << min_points << std::endl;
+        std::cout << "[QuadricDetect] 初始化GPU内存: " << init_time << " ms" << std::endl;
     }
 
     float total_sampling_time = 0.0f;
@@ -142,13 +151,14 @@ void QuadricDetect::findQuadrics_BatchGPU()
     float total_inlier_count_time = 0.0f;
     float total_best_model_time = 0.0f;
     float total_extract_inliers_time = 0.0f;
+    float total_extract_cloud_time = 0.0f;
     float total_remove_points_time = 0.0f;
 
     while (remaining_points >= min_points && iteration < max_iterations)
     {
         if (params_.verbosity > 0)
         {
-            std::cout << "== 第 " << iteration + 1 << " 次迭代，剩余点数 : " << remaining_points << " == " << std::endl;
+            std::cout << "[QuadricDetect] == 第 " << iteration + 1 << " 次迭代，剩余点数: " << remaining_points << " ==" << std::endl;
         }
 
         // Step 2: 采样和构建矩阵
@@ -187,11 +197,20 @@ void QuadricDetect::findQuadrics_BatchGPU()
         int best_count = h_best_count[0];
         int best_model_idx = h_best_index[0];
 
+        // 如果剩余点数已经很少，且内点数不足，立即停止
+        if (remaining_points < min_points * 2 && best_count < params_.min_quadric_inlier_count_absolute) {
+            if (params_.verbosity > 0) {
+                std::cout << "[QuadricDetect] 剩余点数过少且内点不足，提前结束检测" << std::endl;
+            }
+            break;
+        }
+
         if (best_count < params_.min_quadric_inlier_count_absolute)
         {
             if (params_.verbosity > 0)
             {
-                std::cout << "最优模型内点数不足，结束检测" << best_count << std::endl;
+                std::cout << "[QuadricDetect] 最优模型内点数不足 (" << best_count 
+                          << " < " << params_.min_quadric_inlier_count_absolute << ")，结束检测" << std::endl;
             }
             break;
         }
@@ -215,7 +234,11 @@ void QuadricDetect::findQuadrics_BatchGPU()
         total_extract_inliers_time += extract_inliers_time;
 
         // Step 8: 构建内点点云
+        auto extract_cloud_start = std::chrono::high_resolution_clock::now();
         pcl::PointCloud<pcl::PointXYZI>::Ptr inlier_cloud = extractInlierCloud();
+        auto extract_cloud_end = std::chrono::high_resolution_clock::now();
+        float extract_cloud_time = std::chrono::duration<float, std::milli>(extract_cloud_end - extract_cloud_start).count();
+        total_extract_cloud_time += extract_cloud_time;
 
         // Step 9: 保存检测结果
         DetectedPrimitive detected_quadric;
@@ -223,11 +246,6 @@ void QuadricDetect::findQuadrics_BatchGPU()
         detected_quadric.model_coefficients = convertGPUModelToEigen(best_gpu_model);
         detected_quadric.inliers = inlier_cloud;
         detected_primitives_.push_back(detected_quadric);
-
-        if (params_.verbosity > 0)
-        {
-            std::cout << "已保存第 " << detected_primitives_.size() << " 个二次曲面" << std::endl;
-        }
 
         // Step 10: 移除内点
         auto remove_points_start = std::chrono::high_resolution_clock::now();
@@ -237,13 +255,21 @@ void QuadricDetect::findQuadrics_BatchGPU()
         float remove_points_time = std::chrono::duration<float, std::milli>(remove_points_end - remove_points_start).count();
         total_remove_points_time += remove_points_time;
 
-        // 输出本次迭代简要信息（只在verbosity > 1时显示详细timing）
-        if (params_.verbosity > 1)
+        if (params_.verbosity > 0)
         {
             float iteration_total = sampling_time + inverse_power_time + inlier_count_time + 
-                                  best_model_time + extract_inliers_time + remove_points_time;
-            std::cout << "[Iteration " << iteration + 1 << "] Total: " << iteration_total << " ms" << std::endl;
+                                  best_model_time + extract_inliers_time + extract_cloud_time + remove_points_time;
+            std::cout << "[QuadricDetect] 已保存第 " << detected_primitives_.size() << " 个二次曲面" << std::endl;
+            std::cout << "[QuadricDetect] 迭代 " << iteration + 1 << " 时间: " << iteration_total << " ms" << std::endl;
+            std::cout << "  - 采样和构建矩阵: " << sampling_time << " ms" << std::endl;
+            std::cout << "  - 反幂迭代: " << inverse_power_time << " ms" << std::endl;
+            std::cout << "  - 计算内点数: " << inlier_count_time << " ms" << std::endl;
+            std::cout << "  - 找最优模型: " << best_model_time << " ms" << std::endl;
+            std::cout << "  - 提取内点索引: " << extract_inliers_time << " ms" << std::endl;
+            std::cout << "  - 构建内点点云: " << extract_cloud_time << " ms" << std::endl;
+            std::cout << "  - 移除内点: " << remove_points_time << " ms" << std::endl;
         }
+
 
         // 更新循环条件
         remaining_points = d_remaining_indices_.size();
@@ -255,7 +281,17 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
     if (params_.verbosity > 0)
     {
-        std::cout << "== 检测完成，共找到 " << detected_primitives_.size() << " 个二次曲面 == " << std::endl;
+        std::cout << "[QuadricDetect] == 检测完成，共找到 " << detected_primitives_.size() << " 个二次曲面 ==" << std::endl;
+        std::cout << "[QuadricDetect] 总时间统计:" << std::endl;
+        std::cout << "  - 初始化: " << init_time << " ms" << std::endl;
+        std::cout << "  - 采样和构建矩阵: " << total_sampling_time << " ms" << std::endl;
+        std::cout << "  - 反幂迭代: " << total_inverse_power_time << " ms" << std::endl;
+        std::cout << "  - 计算内点数: " << total_inlier_count_time << " ms" << std::endl;
+        std::cout << "  - 找最优模型: " << total_best_model_time << " ms" << std::endl;
+        std::cout << "  - 提取内点索引: " << total_extract_inliers_time << " ms" << std::endl;
+        std::cout << "  - 构建内点点云: " << total_extract_cloud_time << " ms" << std::endl;
+        std::cout << "  - 移除内点: " << total_remove_points_time << " ms" << std::endl;
+        std::cout << "  - 总检测时间: " << total_detect_time << " ms" << std::endl;
     }
 }
 
@@ -263,9 +299,9 @@ void QuadricDetect::performBatchInversePowerIteration(int batch_size)
 {
     auto total_start = std::chrono::high_resolution_clock::now();
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
-        std::cout << "[performBatchInversePowerIteration] 启动批量反幂迭代，batch_size=" << batch_size << std::endl;
+        std::cout << "[QuadricDetect] 启动批量反幂迭代，batch_size=" << batch_size << std::endl;
     }
 
     // Step 1: 从9×10矩阵计算10×10的A^T*A矩阵
@@ -295,19 +331,18 @@ void QuadricDetect::performBatchInversePowerIteration(int batch_size)
     auto total_end = std::chrono::high_resolution_clock::now();
     float total_time = std::chrono::duration<float, std::milli>(total_end - total_start).count();
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
-        std::cout << "[InversePower] Detailed timing:" << std::endl;
-        std::cout << "  Compute A^T*A: " << ata_time << " ms" << std::endl;
-        std::cout << "  QR decomposition: " << qr_time << " ms" << std::endl;
-        std::cout << "  Inverse power iteration: " << power_time << " ms" << std::endl;
-        std::cout << "  Extract quadric models: " << extract_time << " ms" << std::endl;
-        std::cout << "  Total: " << total_time << " ms" << std::endl;
-        std::cout << "[performBatchInversePowerIteration] 批量反幂迭代完成" << std::endl;
+        std::cout << "[QuadricDetect] 反幂迭代详细时间:" << std::endl;
+        std::cout << "  - Compute A^T*A: " << ata_time << " ms" << std::endl;
+        std::cout << "  - QR decomposition: " << qr_time << " ms" << std::endl;
+        std::cout << "  - Inverse power iteration: " << power_time << " ms" << std::endl;
+        std::cout << "  - Extract quadric models: " << extract_time << " ms" << std::endl;
+        std::cout << "  - Total: " << total_time << " ms" << std::endl;
     }
 
-    // 🆕 添加：验证反幂迭代结果
-    if (params_.verbosity > 0)
+    // 验证反幂迭代结果（仅在详细模式下）
+    if (params_.verbosity > 1)
     {
         validateInversePowerResults(batch_size);
     }
@@ -323,9 +358,9 @@ void QuadricDetect::removeFoundPoints(const std::vector<int> &indices_to_remove)
         return;
     }
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
-        std::cout << "[removeFoundPoints] 移除前剩余点数: " << d_remaining_indices_.size() << std::endl;
+        std::cout << "[QuadricDetect] 移除前剩余点数: " << d_remaining_indices_.size() << std::endl;
     }
 
     // 🚀 方案：使用自定义CUDA内核，完全避免Thrust set_difference
@@ -337,11 +372,10 @@ void QuadricDetect::removeFoundPoints(const std::vector<int> &indices_to_remove)
     auto total_end = std::chrono::high_resolution_clock::now();
     float total_time = std::chrono::duration<float, std::milli>(total_end - total_start).count();
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
-        std::cout << "[removeFoundPoints] Remove kernel: " << kernel_time << " ms" << std::endl;
-        std::cout << "[removeFoundPoints] Total time: " << total_time << " ms" << std::endl;
-        std::cout << "[removeFoundPoints] 移除了 " << current_inlier_count_
+        std::cout << "[QuadricDetect] 移除内点时间: " << kernel_time << " ms" << std::endl;
+        std::cout << "[QuadricDetect] 移除了 " << current_inlier_count_
                   << " 个内点，剩余 " << d_remaining_indices_.size() << " 个点" << std::endl;
     }
 }
@@ -464,9 +498,9 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
     inlier_cloud->height = 1;
     inlier_cloud->is_dense = true;
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
-        std::cout << "[extractInlierCloud] 构建了包含 " << inlier_cloud->size() << " 个点的点云" << std::endl;
+        std::cout << "[QuadricDetect] 构建了包含 " << inlier_cloud->size() << " 个内点的点云" << std::endl;
     }
 
     return inlier_cloud;
@@ -480,7 +514,7 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
 //  新增函数：验证反幂迭代结果
 void QuadricDetect::validateInversePowerResults(int batch_size)
 {
-    std::cout << "[validateInversePowerResults] 🔍 验证反幂迭代结果..." << std::endl;
+    std::cout << "[QuadricDetect] 验证反幂迭代结果..." << std::endl;
 
     // 检查前几个特征向量和模型
     int check_count = std::min(3, batch_size);
@@ -497,7 +531,7 @@ void QuadricDetect::validateInversePowerResults(int batch_size)
 
     for (int i = 0; i < check_count; ++i)
     {
-        std::cout << "  📊 模型 " << i << ":" << std::endl;
+        std::cout << "[QuadricDetect] 模型 " << i << ":" << std::endl;
 
         // 检查特征向量
         float *eigenvec = &h_eigenvectors[i * 10];
@@ -517,17 +551,17 @@ void QuadricDetect::validateInversePowerResults(int batch_size)
 
         if (has_nan)
         {
-            std::cout << "    ❌ 特征向量包含NaN/Inf值" << std::endl;
+            std::cout << "[QuadricDetect]    特征向量包含NaN/Inf值" << std::endl;
             all_valid = false;
         }
         else if (norm < 1e-12f)
         {
-            std::cout << "    ❌ 特征向量模长过小: " << norm << std::endl;
+            std::cout << "[QuadricDetect]    特征向量模长过小: " << norm << std::endl;
             all_valid = false;
         }
         else
         {
-            std::cout << "    ✅ 特征向量正常，模长: " << norm << std::endl;
+            std::cout << "[QuadricDetect]    特征向量正常，模长: " << norm << std::endl;
         }
 
         // 检查模型系数
@@ -547,23 +581,23 @@ void QuadricDetect::validateInversePowerResults(int batch_size)
 
         if (!model_valid)
         {
-            std::cout << "    ❌ 模型系数包含NaN/Inf值" << std::endl;
+            std::cout << "[QuadricDetect]    模型系数包含NaN/Inf值" << std::endl;
             all_valid = false;
         }
         else if (coeff_sum < 1e-12f)
         {
-            std::cout << "    ❌ 模型系数全为零" << std::endl;
+            std::cout << "[QuadricDetect]    模型系数全为零" << std::endl;
             all_valid = false;
         }
         else
         {
-            std::cout << "    ✅ 模型系数正常，系数和: " << coeff_sum << std::endl;
+            std::cout << "[QuadricDetect]    模型系数正常，系数和: " << coeff_sum << std::endl;
         }
 
         // 显示前几个系数
         if (params_.verbosity > 1)
         {
-            std::cout << "    📋 前6个系数: [";
+            std::cout << "[QuadricDetect]    前6个系数: [";
             for (int j = 0; j < 6; ++j)
             {
                 std::cout << model.coeffs[j];
@@ -576,76 +610,78 @@ void QuadricDetect::validateInversePowerResults(int batch_size)
 
     if (all_valid)
     {
-        std::cout << "[validateInversePowerResults] ✅ 反幂迭代结果验证通过" << std::endl;
+        std::cout << "[QuadricDetect] 反幂迭代结果验证通过" << std::endl;
     }
     else
     {
-        std::cout << "[validateInversePowerResults] ❌ 反幂迭代结果存在问题，请检查算法实现" << std::endl;
+        std::cout << "[QuadricDetect] 反幂迭代结果存在问题，请检查算法实现" << std::endl;
     }
 }
 
 // 🆕 新增函数：输出最优模型详情
 void QuadricDetect::outputBestModelDetails(const GPUQuadricModel &best_model, int inlier_count, int model_idx, int iteration)
 {
-    std::cout << "\n🏆 ========== 第" << iteration << "次迭代最优模型详情 ==========" << std::endl;
-    std::cout << "📍 模型索引: " << model_idx << " (在1024个候选中)" << std::endl;
-    std::cout << "👥 内点数量: " << inlier_count << std::endl;
-    std::cout << "📊 内点比例: " << (100.0 * inlier_count / d_remaining_indices_.size()) << "%" << std::endl;
+    std::cout << "\n[QuadricDetect] ========== 第" << iteration << "次迭代最优模型详情 ==========" << std::endl;
+    std::cout << "[QuadricDetect] 模型索引: " << model_idx << " (在1024个候选中)" << std::endl;
+    std::cout << "[QuadricDetect] 内点数量: " << inlier_count << std::endl;
+    std::cout << "[QuadricDetect] 内点比例: " << std::fixed << std::setprecision(2) 
+              << (100.0 * inlier_count / d_remaining_indices_.size()) << "%" << std::endl;
 
-    // 转换为Eigen矩阵便于显示
-    Eigen::Matrix4f Q = convertGPUModelToEigen(best_model);
-
-    std::cout << "🔢 二次曲面矩阵 Q:" << std::endl;
-    for (int i = 0; i < 4; ++i)
+    // 转换为Eigen矩阵便于显示（仅在详细模式下）
+    if (params_.verbosity > 1)
     {
-        std::cout << "   [";
-        for (int j = 0; j < 4; ++j)
+        Eigen::Matrix4f Q = convertGPUModelToEigen(best_model);
+        std::cout << "[QuadricDetect] 二次曲面矩阵 Q:" << std::endl;
+        for (int i = 0; i < 4; ++i)
         {
-            std::cout << std::setw(10) << std::setprecision(6) << std::fixed << Q(i, j);
-            if (j < 3)
-                std::cout << ", ";
+            std::cout << "[QuadricDetect]   [";
+            for (int j = 0; j < 4; ++j)
+            {
+                std::cout << std::setw(10) << std::setprecision(6) << std::fixed << Q(i, j);
+                if (j < 3)
+                    std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
         }
-        std::cout << "]" << std::endl;
-    }
 
-    // 分析二次曲面类型（简单判断）
-    float det = Q.determinant();
-    std::cout << "🔍 矩阵行列式: " << det << std::endl;
+        // 分析二次曲面类型（简单判断）
+        float det = Q.determinant();
+        std::cout << "[QuadricDetect] 矩阵行列式: " << det << std::endl;
 
-    // 检查对角线元素符号
-    int pos_diag = 0, neg_diag = 0, zero_diag = 0;
-    for (int i = 0; i < 3; ++i) // 只看前3×3部分
-    {
-        if (Q(i, i) > 1e-6f)
-            pos_diag++;
-        else if (Q(i, i) < -1e-6f)
-            neg_diag++;
+        // 检查对角线元素符号
+        int pos_diag = 0, neg_diag = 0, zero_diag = 0;
+        for (int i = 0; i < 3; ++i) // 只看前3×3部分
+        {
+            if (Q(i, i) > 1e-6f)
+                pos_diag++;
+            else if (Q(i, i) < -1e-6f)
+                neg_diag++;
+            else
+                zero_diag++;
+        }
+
+        std::cout << "[QuadricDetect] 对角线符号分布: +" << pos_diag << " / -" << neg_diag << " / 0:" << zero_diag;
+
+        // 简单的曲面类型推断
+        if (pos_diag == 3 || neg_diag == 3)
+        {
+            std::cout << " → 可能是椭球面" << std::endl;
+        }
+        else if ((pos_diag == 2 && neg_diag == 1) || (pos_diag == 1 && neg_diag == 2))
+        {
+            std::cout << " → 可能是双曲面" << std::endl;
+        }
+        else if (zero_diag > 0)
+        {
+            std::cout << " → 可能是抛物面或退化曲面" << std::endl;
+        }
         else
-            zero_diag++;
+        {
+            std::cout << " → 曲面类型待进一步分析" << std::endl;
+        }
     }
 
-    std::cout << "📈 对角线符号分布: +" << pos_diag << " / -" << neg_diag << " / 0:" << zero_diag;
-
-    // 简单的曲面类型推断
-    if (pos_diag == 3 || neg_diag == 3)
-    {
-        std::cout << " → 可能是椭球面" << std::endl;
-    }
-    else if ((pos_diag == 2 && neg_diag == 1) || (pos_diag == 1 && neg_diag == 2))
-    {
-        std::cout << " → 可能是双曲面" << std::endl;
-    }
-    else if (zero_diag > 0)
-    {
-        std::cout << " → 可能是抛物面或退化曲面" << std::endl;
-    }
-    else
-    {
-        std::cout << " → 曲面类型待进一步分析" << std::endl;
-    }
-
-    std::cout << "================================================\n"
-              << std::endl;
+    std::cout << "[QuadricDetect] ================================================" << std::endl;
 }
 
 
