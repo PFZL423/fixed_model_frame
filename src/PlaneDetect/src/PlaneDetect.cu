@@ -1,7 +1,10 @@
 #include "PlaneDetect/PlaneDetect.h"
 #include "PlaneDetect/PlaneDetect.cuh"
 #include <thrust/device_vector.h>
-#include <thrust/sequence.h>
+#include <thrust/device_ptr.h>
+#include <thrust/copy.h>
+#include <thrust/distance.h>
+#include <thrust/count.h>
 #include <ctime>
 #include <iostream>
 #include <cmath>
@@ -25,6 +28,7 @@ __global__ void sampleAndFitPlanes_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,  // 新增：有效性掩码
     curandState *rand_states,
     int batch_size,
     GPUPlaneModel *batch_models)
@@ -36,10 +40,27 @@ __global__ void sampleAndFitPlanes_Kernel(
     curandState local_state = rand_states[model_id];
 
     // 采样3个点（相比二次曲面的9个点大大简化）
+    // 增加掩码检查：只采样有效点
     int sample_indices[3];
     for (int i = 0; i < 3; ++i)
     {
-        sample_indices[i] = remaining_indices[curand(&local_state) % num_remaining];
+        int candidate_idx;
+        int attempts = 0;
+        do {
+            candidate_idx = remaining_indices[curand(&local_state) % num_remaining];
+            attempts++;
+        } while (valid_mask[candidate_idx] == 0 && attempts < 100);
+        
+        if (valid_mask[candidate_idx] == 0) {
+            // 如果100次尝试都失败，使用默认平面
+            batch_models[model_id].coeffs[0] = 0.0f;
+            batch_models[model_id].coeffs[1] = 0.0f;
+            batch_models[model_id].coeffs[2] = 1.0f;
+            batch_models[model_id].coeffs[3] = 0.0f;
+            rand_states[model_id] = local_state;
+            return;
+        }
+        sample_indices[i] = candidate_idx;
     }
 
     // 获取3个点
@@ -137,6 +158,7 @@ __global__ void countInliersBatch_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,  // 新增：有效性掩码
     const GPUPlaneModel *batch_models,
     int batch_size,
     float threshold,
@@ -151,7 +173,10 @@ __global__ void countInliersBatch_Kernel(
 
     for (int i = thread_id; i < num_remaining; i += blockDim.x * gridDim.x)
     {
-        GPUPoint3f point = all_points[remaining_indices[i]];
+        int global_idx = remaining_indices[i];
+        if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
+        
+        GPUPoint3f point = all_points[global_idx];
         float dist = evaluatePlaneDistance(point, batch_models[model_id]);
 
         if (dist < threshold)
@@ -232,6 +257,7 @@ __global__ void extractInliers_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,  // 新增：有效性掩码
     const GPUPlaneModel *model,
     float threshold,
     int *inlier_indices,
@@ -242,7 +268,7 @@ __global__ void extractInliers_Kernel(
         return;
 
     int global_point_index = remaining_indices[idx];
-    if (global_point_index < 0)
+    if (global_point_index < 0 || valid_mask[global_point_index] == 0)
         return;
 
     GPUPoint3f point = all_points[global_point_index];
@@ -262,7 +288,7 @@ __global__ void extractInliers_Kernel(
     }
 }
 
-// 移除内点
+// 移除内点（保留用于兼容性，但将被markMaskKernel替代）
 __global__ void removePointsKernel(
     const int *remaining_points,
     int remaining_count,
@@ -293,6 +319,21 @@ __global__ void removePointsKernel(
     {
         int write_pos = atomicAdd(output_count, 1);
         output_points[write_pos] = point_id;
+    }
+}
+
+// 标记掩码内核 - 极速逻辑移除
+__global__ void markMaskKernel(
+    const int *inlier_indices,
+    int inlier_count,
+    uint8_t *valid_mask)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < inlier_count) {
+        int point_idx = inlier_indices[idx];
+        if (point_idx >= 0) {
+            valid_mask[point_idx] = 0;  // 标记为已移除
+        }
     }
 }
 
@@ -378,6 +419,7 @@ void PlaneDetect<PointT>::launchSampleAndFitPlanes(int batch_size)
         thrust::raw_pointer_cast(d_all_points_.data()),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
+        d_valid_mask_,  // 新增：传入掩码
         thrust::raw_pointer_cast(d_rand_states_.data()),
         batch_size,
         thrust::raw_pointer_cast(d_batch_models_.data()));
@@ -396,6 +438,7 @@ void PlaneDetect<PointT>::launchCountInliersBatch(int batch_size)
         thrust::raw_pointer_cast(d_all_points_.data()),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
+        d_valid_mask_,  // 新增：传入掩码
         thrust::raw_pointer_cast(d_batch_models_.data()),
         batch_size,
         static_cast<float>(params_.plane_distance_threshold),
@@ -437,6 +480,7 @@ void PlaneDetect<PointT>::launchExtractInliers(const GPUPlaneModel *model)
         thrust::raw_pointer_cast(d_all_points_.data()),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
+        d_valid_mask_,  // 新增：传入掩码
         thrust::raw_pointer_cast(d_model_safe.data()),
         static_cast<float>(params_.plane_distance_threshold),
         thrust::raw_pointer_cast(d_temp_inlier_indices_.data()),
@@ -478,33 +522,80 @@ void PlaneDetect<PointT>::launchRemovePointsKernel()
     // 检查内点数量的有效性
     if (current_inlier_count_ <= 0 || current_inlier_count_ > static_cast<int>(d_temp_inlier_indices_.size()))
     {
-        std::cerr << "[launchRemovePointsKernel] 警告：内点数量无效 (" << current_inlier_count_
-                  << ")，跳过点移除操作" << std::endl;
+        return;  // 静默返回，避免日志开销
+    }
+
+    if (d_valid_mask_ == nullptr)
+    {
+        std::cerr << "[launchRemovePointsKernel] 错误：掩码缓冲区未初始化" << std::endl;
         return;
     }
 
-    // 避免使用thrust::sort，改用简单的线性查找方法
-    // 分配输出空间
-    thrust::device_vector<int> d_new_remaining(d_remaining_indices_.size());
-    thrust::device_vector<int> d_output_count(1, 0);
-
+    // 极速标记：只调用标记kernel，无物理搬运
     dim3 block(256);
-    dim3 grid((d_remaining_indices_.size() + block.x - 1) / block.x);
-
-    removePointsKernel<<<grid, block>>>(
-        thrust::raw_pointer_cast(d_remaining_indices_.data()),
-        static_cast<int>(d_remaining_indices_.size()),
+    dim3 grid((current_inlier_count_ + block.x - 1) / block.x);
+    
+    markMaskKernel<<<grid, block, 0, 0>>>(
         thrust::raw_pointer_cast(d_temp_inlier_indices_.data()),
         current_inlier_count_,
-        thrust::raw_pointer_cast(d_new_remaining.data()),
-        thrust::raw_pointer_cast(d_output_count.data()));
-    cudaDeviceSynchronize();
+        d_valid_mask_);
+    
+    // 严禁cudaDeviceSynchronize - 保持异步
+}
 
-    thrust::host_vector<int> h_count = d_output_count;
-    int new_size = h_count[0];
+// 设备端lambda函数包装器（用于thrust::copy_if）
+struct IsValidPoint {
+    __device__ bool operator()(uint8_t mask) const {
+        return mask == 1;
+    }
+};
 
-    d_new_remaining.resize(new_size);
-    d_remaining_indices_ = std::move(d_new_remaining);
+template <typename PointT>
+void PlaneDetect<PointT>::compactValidPoints(thrust::device_vector<GPUPoint3f> &output_points) const
+{
+    if (d_points_buffer_ == nullptr || d_valid_mask_ == nullptr || d_all_points_.empty())
+    {
+        output_points.clear();
+        return;
+    }
+
+    size_t point_count = d_all_points_.size();
+    
+    // 使用thrust::copy_if根据掩码提取有效点
+    thrust::device_vector<GPUPoint3f> temp_points(point_count);
+    
+    // 创建device指针包装器
+    thrust::device_ptr<GPUPoint3f> d_points_ptr = thrust::device_pointer_cast(d_points_buffer_);
+    thrust::device_ptr<uint8_t> d_mask_ptr = thrust::device_pointer_cast(d_valid_mask_);
+    
+    // 使用copy_if提取有效点（掩码为1的点）- 使用functor替代lambda
+    auto end_it = thrust::copy_if(
+        d_points_ptr,
+        d_points_ptr + point_count,
+        d_mask_ptr,
+        temp_points.begin(),
+        IsValidPoint());
+    
+    // 计算实际有效点数量
+    int valid_count = thrust::distance(temp_points.begin(), end_it);
+    temp_points.resize(valid_count);
+    
+    output_points = std::move(temp_points);
+}
+
+template <typename PointT>
+int PlaneDetect<PointT>::countValidPoints() const
+{
+    if (d_valid_mask_ == nullptr || d_all_points_.empty())
+    {
+        return 0;
+    }
+    
+    size_t point_count = d_all_points_.size();
+    thrust::device_ptr<uint8_t> d_mask_ptr = thrust::device_pointer_cast(d_valid_mask_);
+    
+    // 使用thrust::count统计掩码为1的点数
+    return static_cast<int>(thrust::count(d_mask_ptr, d_mask_ptr + point_count, 1));
 }
 
 // 显式模板实例化

@@ -36,7 +36,7 @@ min_plane_inlier_count_absolute: 40000 # 有效模型的最小内点数(绝对�
 plane_max_iterations: 100 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
 batch_size: 512 # GPU批处理大小
-verbosity: 0 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
 
 # ========== Supervoxel Processing ==========
 enable_supervoxel: false # 是否启用超体素处理（默认关闭，测试时设为 true）

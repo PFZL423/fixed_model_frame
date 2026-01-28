@@ -195,6 +195,7 @@ private:
     // GPU显存预分配（避免每帧malloc/free开销）
     // ========================================
     GPUPoint3f* d_points_buffer_;        ///< 预分配的GPU显存缓冲区
+    uint8_t* d_valid_mask_;              ///< 点云有效性掩码（1=有效，0=已移除）
     size_t max_points_capacity_;        ///< 最大容量（默认200万点）
 
     // ========================================
@@ -302,7 +303,21 @@ private:
     void removeFoundPoints(const std::vector<int> &indices_to_remove);
 
     /**
-     * @brief 启动GPU内核移除内点
+     * @brief 启动GPU内核移除内点（使用掩码标记）
      */
     void launchRemovePointsKernel();
+
+    /**
+     * @brief 压缩有效点云 - 根据掩码提取有效点
+     * 使用thrust::copy_if进行最后一键提取，必须在.cu文件中实现
+     * @param output_points [out] 输出的紧凑点云
+     */
+    void compactValidPoints(thrust::device_vector<GPUPoint3f> &output_points) const;
+
+    /**
+     * @brief 计算有效点数量 - 根据掩码统计
+     * 使用thrust::count统计掩码为1的点数，必须在.cu文件中实现
+     * @return 有效点数量
+     */
+    int countValidPoints() const;
 };

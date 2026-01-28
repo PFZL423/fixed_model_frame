@@ -36,6 +36,7 @@ PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
 {
     // 初始化预分配缓冲区
     d_points_buffer_ = nullptr;
+    d_valid_mask_ = nullptr;
     max_points_capacity_ = 2000000; // 200万点，足够处理大部分场景
     
     // 预分配GPU显存缓冲区
@@ -47,11 +48,30 @@ PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
         d_points_buffer_ = nullptr;
         max_points_capacity_ = 0;
     }
+    
+    // 预分配掩码缓冲区（200万字节，每点1字节）
+    err = cudaMalloc((void**)&d_valid_mask_, max_points_capacity_ * sizeof(uint8_t));
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[PlaneDetect] 错误：无法预分配掩码缓冲区: " 
+                  << cudaGetErrorString(err) << std::endl;
+        d_valid_mask_ = nullptr;
+        if (d_points_buffer_ != nullptr)
+        {
+            cudaFree(d_points_buffer_);
+            d_points_buffer_ = nullptr;
+        }
+        max_points_capacity_ = 0;
+    }
     else if (params_.verbosity > 0)
     {
         std::cout << "[PlaneDetect] 预分配GPU显存缓冲区: " 
                   << max_points_capacity_ << " 点 (" 
                   << (max_points_capacity_ * sizeof(GPUPoint3f) / 1024.0 / 1024.0) 
+                  << " MB)" << std::endl;
+        std::cout << "[PlaneDetect] 预分配掩码缓冲区: " 
+                  << max_points_capacity_ << " 点 (" 
+                  << (max_points_capacity_ * sizeof(uint8_t) / 1024.0 / 1024.0) 
                   << " MB)" << std::endl;
     }
     
@@ -65,10 +85,18 @@ PlaneDetect<pointT>::~PlaneDetect(){
     {
         cudaFree(d_points_buffer_);
         d_points_buffer_ = nullptr;
-        if (params_.verbosity > 0)
-        {
-            std::cout << "[PlaneDetect] 已释放预分配的GPU显存缓冲区" << std::endl;
-        }
+    }
+    
+    // 释放预分配的掩码缓冲区
+    if (d_valid_mask_ != nullptr)
+    {
+        cudaFree(d_valid_mask_);
+        d_valid_mask_ = nullptr;
+    }
+    
+    if (params_.verbosity > 0)
+    {
+        std::cout << "[PlaneDetect] 已释放预分配的GPU显存缓冲区和掩码缓冲区" << std::endl;
     }
 }
 
@@ -122,9 +150,9 @@ void PlaneDetect<PointT>::convertPCLtoGPU(const typename pcl::PointCloud<PointT>
         return;
     }
 
-    if (d_points_buffer_ == nullptr)
+    if (d_points_buffer_ == nullptr || d_valid_mask_ == nullptr)
     {
-        std::cerr << "[convertPCLtoGPU] 错误：GPU显存缓冲区未初始化" << std::endl;
+        std::cerr << "[convertPCLtoGPU] 错误：GPU显存缓冲区或掩码缓冲区未初始化" << std::endl;
         return;
     }
 
@@ -177,9 +205,13 @@ void PlaneDetect<PointT>::convertPCLtoGPU(const typename pcl::PointCloud<PointT>
     auto cpu_convert_end = std::chrono::high_resolution_clock::now();
     float cpu_convert_time = std::chrono::duration<float, std::milli>(cpu_convert_end - cpu_convert_start).count();
 
-    // Step 2: 更新remaining_indices
+    // Step 2: 重置掩码为1（所有点初始有效）- 使用异步操作
     auto gpu_upload_start = std::chrono::high_resolution_clock::now();
     
+    // 使用cudaMemsetAsync重置掩码为1（所有点初始有效）
+    cudaMemsetAsync(d_valid_mask_, 1, point_count * sizeof(uint8_t), 0);  // 使用默认stream
+    
+    // 更新remaining_indices
     // 使用简单的循环初始化，避免thrust::sequence和resize的兼容性问题
     std::vector<int> h_indices(point_count);
     for (size_t i = 0; i < point_count; ++i)
@@ -218,7 +250,7 @@ void PlaneDetect<PointT>::findPlanes_BatchGPU()
     auto init_end = std::chrono::high_resolution_clock::now();
     float init_time = std::chrono::duration<float, std::milli>(init_end - init_start).count();
 
-    size_t remaining_points = d_remaining_indices_.size();
+    size_t remaining_points = countValidPoints();
     size_t min_points = static_cast<size_t>(params_.min_remaining_points_percentage * d_all_points_.size());
 
     int iteration = 0;
@@ -342,8 +374,8 @@ void PlaneDetect<PointT>::findPlanes_BatchGPU()
             std::cout << "  Iteration total: " << iteration_total << " ms" << std::endl;
         }
 
-        // 更新循环条件
-        remaining_points = d_remaining_indices_.size();
+        // 更新循环条件（使用掩码统计有效点数）
+        remaining_points = countValidPoints();
         iteration++;
     }
 
@@ -412,7 +444,7 @@ void PlaneDetect<PointT>::removeFoundPoints(const std::vector<int> &indices_to_r
 
     if (params_.verbosity > 0)
     {
-        std::cout << "[removeFoundPoints] 移除前剩余点数: " << d_remaining_indices_.size() << std::endl;
+        std::cout << "[removeFoundPoints] 移除前剩余点数: " << countValidPoints() << std::endl;
     }
 
     // 方案：使用自定义CUDA内核，完全避免Thrust set_difference
@@ -429,7 +461,7 @@ void PlaneDetect<PointT>::removeFoundPoints(const std::vector<int> &indices_to_r
         std::cout << "[removeFoundPoints] Remove kernel: " << kernel_time << " ms" << std::endl;
         std::cout << "[removeFoundPoints] Total time: " << total_time << " ms" << std::endl;
         std::cout << "[removeFoundPoints] 移除了 " << current_inlier_count_
-                  << " 个内点，剩余 " << d_remaining_indices_.size() << " 个点" << std::endl;
+                  << " 个内点，剩余 " << countValidPoints() << " 个点" << std::endl;
     }
 }
 template <typename PointT>
@@ -496,44 +528,52 @@ size_t PlaneDetect<PointT>::getPlaneInlierCount(size_t index) const
 template <typename PointT>
 size_t PlaneDetect<PointT>::getRemainingPointCount() const
 {
-    return d_remaining_indices_.size();
+    return countValidPoints();
 }
 template <typename PointT>
 typename pcl::PointCloud<PointT>::Ptr PlaneDetect<PointT>::getFinalCloud() const
 {
-    // 关键修复：确保所有 GPU 操作完成后再复制数据
-    // 因为 thrust 的 device_vector 复制可能是异步的
+    // 确保所有 GPU 操作完成
     cudaDeviceSynchronize();
     
     typename pcl::PointCloud<PointT>::Ptr final_cloud(new pcl::PointCloud<PointT>());
     
-    // 如果没有剩余点的索引信息，返回空点云
-    if (d_remaining_indices_.empty() || d_all_points_.empty()) {
+    // 如果没有点云数据，返回空点云
+    if (d_points_buffer_ == nullptr || d_valid_mask_ == nullptr || d_all_points_.empty()) {
         return final_cloud;
     }
     
-    // 将剩余点的索引从GPU复制到CPU
-    thrust::host_vector<int> h_remaining_indices = d_remaining_indices_;
-    thrust::host_vector<GPUPoint3f> h_all_points = d_all_points_;
+    // 调用compactValidPoints获取紧凑点云（根据掩码提取有效点）
+    thrust::device_vector<GPUPoint3f> d_compact_points;
+    compactValidPoints(d_compact_points);
     
-    // 再次同步，确保 thrust 的复制完成
-    cudaDeviceSynchronize();
+    if (d_compact_points.empty()) {
+        return final_cloud;
+    }
     
+    // 下载到CPU
+    std::vector<GPUPoint3f> h_points(d_compact_points.size());
+    cudaMemcpy(h_points.data(), 
+               thrust::raw_pointer_cast(d_compact_points.data()),
+               d_compact_points.size() * sizeof(GPUPoint3f),
+               cudaMemcpyDeviceToHost);
+    if (!h_points.empty()) {
+        std::cout << "[DEBUG] First point: " << h_points[0].x << ", " 
+                  << h_points[0].y << ", " << h_points[0].z << std::endl;
+    }
     // 预分配空间
-    final_cloud->points.reserve(h_remaining_indices.size());
+    final_cloud->points.reserve(h_points.size());
     
-    // 根据剩余索引构建最终点云
-    for (int idx : h_remaining_indices) {
-        if (idx >= 0 && idx < (int)h_all_points.size()) {
-            PointT point;
-            point.x = h_all_points[idx].x;
-            point.y = h_all_points[idx].y;  
-            point.z = h_all_points[idx].z;
-            if constexpr (has_intensity<PointT>::value) {
-                point.intensity = h_all_points[idx].intensity;  // 恢复强度信息（关键！）
-            }
-            final_cloud->points.push_back(point);
+    // 构建PCL点云
+    for (const auto &gpu_pt : h_points) {
+        PointT point;
+        point.x = gpu_pt.x;
+        point.y = gpu_pt.y;  
+        point.z = gpu_pt.z;
+        if constexpr (has_intensity<PointT>::value) {
+            point.intensity = gpu_pt.intensity;  // 恢复强度信息
         }
+        final_cloud->points.push_back(point);
     }
     
     // 设置点云属性

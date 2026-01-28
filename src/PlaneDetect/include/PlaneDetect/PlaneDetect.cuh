@@ -27,6 +27,7 @@ __global__ void sampleAndFitPlanes_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,  // 新增：有效性掩码
     curandState *rand_states,
     int batch_size,
     GPUPlaneModel *batch_models);
@@ -47,6 +48,7 @@ __global__ void countInliersBatch_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,  // 新增：有效性掩码
     const GPUPlaneModel *batch_models,
     int batch_size,
     float threshold,
@@ -81,6 +83,7 @@ __global__ void extractInliers_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,  // 新增：有效性掩码
     const GPUPlaneModel *model,
     float threshold,
     int *inlier_indices,
@@ -102,6 +105,18 @@ __global__ void removePointsKernel(
     int inlier_count,
     int *output_points,
     int *output_count);
+
+/**
+ * @brief 标记掩码内核 - 极速逻辑移除
+ * 根据内点索引将掩码对应位置设为0，实现逻辑移除
+ * @param inlier_indices 内点索引数组
+ * @param inlier_count 内点数量
+ * @param valid_mask [out] 有效性掩码（将被修改）
+ */
+__global__ void markMaskKernel(
+    const int *inlier_indices,
+    int inlier_count,
+    uint8_t *valid_mask);
 
 // ========================================
 // GPU设备函数 - 内联数学计算
