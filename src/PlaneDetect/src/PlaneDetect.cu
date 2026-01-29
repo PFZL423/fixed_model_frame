@@ -173,6 +173,17 @@ __global__ void countInliersBatch_Kernel(
     if (model_id >= batch_size)
         return;
 
+    // Shared Memory 优化：缓存当前 Block 对应的平面模型参数
+    // 一个 Block 内的 256 个线程共享同一个模型，避免重复访问 Global Memory
+    __shared__ GPUPlaneModel shared_model;
+    
+    // 协作式加载：threadIdx.x == 0 的线程负责从 Global Memory 加载模型
+    if (threadIdx.x == 0)
+    {
+        shared_model = batch_models[model_id];
+    }
+    __syncthreads();  // 确保所有线程等待模型加载完成
+
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     int local_count = 0;
 
@@ -187,7 +198,8 @@ __global__ void countInliersBatch_Kernel(
         if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
         
         GPUPoint3f point = all_points[global_idx];
-        float dist = evaluatePlaneDistance(point, batch_models[model_id]);
+        // 使用 shared memory 中的模型，而不是从 Global Memory 读取
+        float dist = evaluatePlaneDistance(point, shared_model);
 
         if (dist < threshold)
         {
@@ -278,6 +290,17 @@ __global__ void fineCountInliers_Kernel(
     if (candidate_id >= k)
         return;
 
+    // Shared Memory 优化：缓存当前 Block 对应的候选模型参数
+    // 一个 Block 内的 256 个线程共享同一个模型，避免重复访问 Global Memory
+    __shared__ GPUPlaneModel shared_model;
+    
+    // 协作式加载：threadIdx.x == 0 的线程负责从 Global Memory 加载模型
+    if (threadIdx.x == 0)
+    {
+        shared_model = candidate_models[candidate_id];
+    }
+    __syncthreads();  // 确保所有线程等待模型加载完成
+
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     int local_count = 0;
 
@@ -288,7 +311,8 @@ __global__ void fineCountInliers_Kernel(
         if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
         
         GPUPoint3f point = all_points[global_idx];
-        float dist = evaluatePlaneDistance(point, candidate_models[candidate_id]);
+        // 使用 shared memory 中的模型，而不是从 Global Memory 读取
+        float dist = evaluatePlaneDistance(point, shared_model);
 
         if (dist < threshold)
         {
@@ -588,7 +612,7 @@ void PlaneDetect<PointT>::launchCountInliersBatch(int batch_size)
         static_cast<float>(params_.plane_distance_threshold),
         stride,
         thrust::raw_pointer_cast(d_batch_inlier_counts_.data()));
-    cudaStreamSynchronize(stream_);
+    // 移除同步：launchSelectTopKModels 中的 thrust 操作会隐式同步，保持异步流水线
 }
 
 template <typename PointT>
