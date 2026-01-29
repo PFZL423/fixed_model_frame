@@ -295,29 +295,54 @@ void PlaneDetect<PointT>::findPlanes_BatchGPU()
         float sampling_time = std::chrono::duration<float, std::milli>(sampling_end - sampling_start).count();
         total_sampling_time += sampling_time;
 
-        // Step 3: 计算内点数 (跳过反幂迭代，直接验证)
+        // Step 3: 两阶段RANSAC竞速
+        // 3.1 粗筛阶段：对batch_size个模型进行子采样计数（2%采样率）
         auto inlier_count_start = std::chrono::high_resolution_clock::now();
-        launchCountInliersBatch(batch_size);
-        auto inlier_count_end = std::chrono::high_resolution_clock::now();
-        float inlier_count_time = std::chrono::duration<float, std::milli>(inlier_count_end - inlier_count_start).count();
+        launchCountInliersBatch(batch_size);  // 粗筛，得到coarse_score
+        auto coarse_end = std::chrono::high_resolution_clock::now();
+        float coarse_time = std::chrono::duration<float, std::milli>(coarse_end - inlier_count_start).count();
+        
+        // 3.2 Top-K选择：选出coarse_score最高的k个模型索引
+        launchSelectTopKModels(params_.ransac_fine_k);
+        auto topk_end = std::chrono::high_resolution_clock::now();
+        float topk_time = std::chrono::duration<float, std::milli>(topk_end - coarse_end).count();
+        
+        // 3.3 精选阶段：对前k个模型进行全量计数
+        launchFineCountInliersBatch(params_.ransac_fine_k);  // 精选，得到fine_score
+        auto fine_end = std::chrono::high_resolution_clock::now();
+        float fine_time = std::chrono::duration<float, std::milli>(fine_end - topk_end).count();
+        
+        float inlier_count_time = coarse_time + topk_time + fine_time;
         total_inlier_count_time += inlier_count_time;
 
-        // Step 4: 找最优模型
+        // Step 4: 从精选结果中找最优模型
         auto best_model_start = std::chrono::high_resolution_clock::now();
-        launchFindBestModel(batch_size);
+        // 从d_fine_inlier_counts_中找出最大值及其索引
+        thrust::host_vector<int> h_fine_counts(params_.ransac_fine_k);
+        thrust::copy_n(d_fine_inlier_counts_.begin(), params_.ransac_fine_k, h_fine_counts.begin());
+        
+        int best_fine_count = 0;
+        int best_fine_idx = -1;
+        for (int i = 0; i < params_.ransac_fine_k; ++i)
+        {
+            if (h_fine_counts[i] > best_fine_count)
+            {
+                best_fine_count = h_fine_counts[i];
+                best_fine_idx = i;
+            }
+        }
+        
+        // 获取最优模型在原始batch中的索引
+        thrust::host_vector<int> h_top_k_indices(params_.ransac_fine_k);
+        thrust::copy_n(d_top_k_indices_.begin(), params_.ransac_fine_k, h_top_k_indices.begin());
+        int best_model_idx = (best_fine_idx >= 0) ? h_top_k_indices[best_fine_idx] : -1;
+        int best_count = best_fine_count;
+        
         auto best_model_end = std::chrono::high_resolution_clock::now();
         float best_model_time = std::chrono::duration<float, std::milli>(best_model_end - best_model_start).count();
         total_best_model_time += best_model_time;
 
-        // 获取最优结果
-        thrust::host_vector<int> h_best_index(1);
-        thrust::host_vector<int> h_best_count(1);
-        getBestModelResults(h_best_index, h_best_count);
-
-        int best_count = h_best_count[0];
-        int best_model_idx = h_best_index[0];
-
-        if (best_count < params_.min_plane_inlier_count_absolute)
+        if (best_model_idx < 0 || best_count < params_.min_plane_inlier_count_absolute)
         {
             if (params_.verbosity > 0)
             {
@@ -327,10 +352,10 @@ void PlaneDetect<PointT>::findPlanes_BatchGPU()
             break;
         }
 
-        // Step 5: 获取最优平面模型
-        thrust::host_vector<GPUPlaneModel> h_best_model(1);
-        thrust::copy_n(d_batch_models_.begin() + best_model_idx, 1, h_best_model.begin());
-        GPUPlaneModel best_gpu_model = h_best_model[0];
+        // Step 5: 获取最优平面模型（从候选模型中获取）
+        thrust::host_vector<GPUPlaneModel> h_candidate_models(params_.ransac_fine_k);
+        thrust::copy_n(d_candidate_models_.begin(), params_.ransac_fine_k, h_candidate_models.begin());
+        GPUPlaneModel best_gpu_model = h_candidate_models[best_fine_idx];
 
         // 输出最优模型详情
         if (params_.verbosity > 0)
@@ -379,7 +404,10 @@ void PlaneDetect<PointT>::findPlanes_BatchGPU()
         {
             std::cout << "[Iteration " << iteration + 1 << "] Timing breakdown:" << std::endl;
             std::cout << "  Sampling & fitting: " << sampling_time << " ms" << std::endl;
-            std::cout << "  Inlier counting: " << inlier_count_time << " ms" << std::endl;
+            std::cout << "  Coarse counting: " << coarse_time << " ms" << std::endl;
+            std::cout << "  Top-K selection: " << topk_time << " ms" << std::endl;
+            std::cout << "  Fine counting: " << fine_time << " ms" << std::endl;
+            std::cout << "  Total inlier counting: " << inlier_count_time << " ms" << std::endl;
             std::cout << "  Best model finding: " << best_model_time << " ms" << std::endl;
             std::cout << "  Extract inliers: " << extract_inliers_time << " ms" << std::endl;
             std::cout << "  Remove points: " << remove_points_time << " ms" << std::endl;

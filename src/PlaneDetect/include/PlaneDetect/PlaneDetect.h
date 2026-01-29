@@ -80,6 +80,10 @@ struct DetectorParams
     // === Batch-RANSAC参数 ===
     int batch_size = 2048;                         ///< 每批次处理的样本数量
     
+    // === 两阶段RANSAC竞速参数 ===
+    double ransac_coarse_ratio = 0.02;             ///< 粗筛采样率（默认2%，stride=50）
+    int ransac_fine_k = 20;                       ///< 精选阶段候选模型数量（默认20）
+    
     // === 调试和输出控制 ===
     int verbosity = 1;                             ///< 详细输出级别 (0=静默, 1=正常, 2=详细)
 };
@@ -219,6 +223,12 @@ private:
     thrust::device_vector<int> d_best_model_index_; ///< 最优模型在batch中的索引
     thrust::device_vector<int> d_best_model_count_; ///< 最优模型的内点数
 
+    // 两阶段RANSAC竞速相关
+    thrust::device_vector<int> d_indices_full_;       ///< 完整索引序列（用于排序，预分配batch_size）
+    thrust::device_vector<int> d_top_k_indices_;      ///< Top-K模型索引（用于精选，预分配128）
+    thrust::device_vector<int> d_fine_inlier_counts_; ///< 精选阶段内点计数（预分配128）
+    thrust::device_vector<GPUPlaneModel> d_candidate_models_; ///< 候选模型数组（预分配128）
+
     /**
      * @brief 将PCL点云转换为GPU格式并上传
      * @param cloud 输入的PCL点云
@@ -269,11 +279,26 @@ private:
     void launchSampleAndFitPlanes(int batch_size);
 
     /**
-     * @brief 启动批量内点计数内核
+     * @brief 启动批量内点计数内核（粗筛阶段）
      * 使用2D Grid架构：Y维度对应模型，X维度对应点云
+     * 通过stride参数实现子采样，大幅降低计算量
      * @param batch_size 需要验证的模型数量
      */
     void launchCountInliersBatch(int batch_size);
+
+    /**
+     * @brief 在GPU端选出coarse_score最高的k个模型索引
+     * 使用thrust::sort_by_key进行排序并提取Top-K
+     * @param k 需要选择的候选模型数量
+     */
+    void launchSelectTopKModels(int k);
+
+    /**
+     * @brief 启动精选阶段内点计数内核
+     * 只对前k个候选模型执行全量点云计数
+     * @param k 候选模型数量
+     */
+    void launchFineCountInliersBatch(int k);
 
     /**
      * @brief 启动最优模型查找内核

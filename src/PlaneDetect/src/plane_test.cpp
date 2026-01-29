@@ -131,6 +131,10 @@ private:
         pnh_.param("min_plane_inlier_percentage", detector_params_.min_plane_inlier_percentage, 0.05);
         pnh_.param("batch_size", detector_params_.batch_size, 2048);
         pnh_.param("verbosity", detector_params_.verbosity, 1);
+        
+        // 两阶段RANSAC竞速参数
+        pnh_.param("ransac_coarse_ratio", detector_params_.ransac_coarse_ratio, 0.02);
+        pnh_.param("ransac_fine_k", detector_params_.ransac_fine_k, 20);
 
     // 超体素功能开关
         pnh_.param("enable_supervoxel", enable_supervoxel_, false);
@@ -161,6 +165,11 @@ private:
         ROS_INFO("  Distance threshold: %.4f", detector_params_.plane_distance_threshold);
         ROS_INFO("  Min inliers: %d", detector_params_.min_plane_inlier_count_absolute);
         ROS_INFO("  Batch size: %d", detector_params_.batch_size);
+        ROS_INFO("  RANSAC coarse ratio: %.4f (stride=%d)", 
+                 detector_params_.ransac_coarse_ratio,
+                 (detector_params_.ransac_coarse_ratio >= 1.0) ? 1 : 
+                 static_cast<int>(1.0 / detector_params_.ransac_coarse_ratio));
+        ROS_INFO("  RANSAC fine k: %d", detector_params_.ransac_fine_k);
         ROS_INFO("  Supervoxel: %s", enable_supervoxel_ ? "enabled" : "disabled");
         if (enable_supervoxel_)
         {

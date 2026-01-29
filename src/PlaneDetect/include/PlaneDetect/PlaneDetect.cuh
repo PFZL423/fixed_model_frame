@@ -33,26 +33,55 @@ __global__ void sampleAndFitPlanes_Kernel(
     GPUPlaneModel *batch_models);
 
 /**
- * @brief 批量内点计数内核 - 2D并行验证
+ * @brief 批量内点计数内核 - 2D并行验证（粗筛阶段）
  * 使用2D Grid架构：blockIdx.y对应模型ID，blockIdx.x×threadIdx.x对应点ID
  * 每个block内使用shared memory reduce提高效率
+ * 通过stride参数实现子采样，大幅降低计算量
  * @param all_points 所有点云数据 (GPU)
  * @param remaining_indices 剩余点索引 (GPU)
  * @param num_remaining 剩余点数量
+ * @param valid_mask 有效性掩码
  * @param batch_models 批量平面模型 (GPU)
  * @param batch_size 模型数量
  * @param threshold 内点距离阈值
- * @param batch_inlier_counts [out] 每个模型的内点计数
+ * @param stride 采样步长（1=全量，50=2%采样）
+ * @param batch_inlier_counts [out] 每个模型的内点计数（粗筛分数）
  */
 __global__ void countInliersBatch_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
-    const uint8_t *valid_mask,  // 新增：有效性掩码
+    const uint8_t *valid_mask,
     const GPUPlaneModel *batch_models,
     int batch_size,
     float threshold,
+    int stride,
     int *batch_inlier_counts);
+
+/**
+ * @brief 精选阶段内点计数内核 - 对Top-K模型全量计数
+ * 使用2D Grid架构：blockIdx.y对应候选模型索引，blockIdx.x×threadIdx.x对应点ID
+ * 只对排名前k的候选模型执行100%全量点云计数
+ * @param all_points 所有点云数据 (GPU)
+ * @param remaining_indices 剩余点索引 (GPU)
+ * @param num_remaining 剩余点数量
+ * @param valid_mask 有效性掩码
+ * @param candidate_models 候选模型数组 (GPU，长度k)
+ * @param candidate_indices 候选模型在batch中的原始索引 (GPU，长度k)
+ * @param k 候选模型数量
+ * @param threshold 内点距离阈值
+ * @param fine_inlier_counts [out] 每个候选模型的精选内点计数
+ */
+__global__ void fineCountInliers_Kernel(
+    const GPUPoint3f *all_points,
+    const int *remaining_indices,
+    int num_remaining,
+    const uint8_t *valid_mask,
+    const GPUPlaneModel *candidate_models,
+    const int *candidate_indices,
+    int k,
+    float threshold,
+    int *fine_inlier_counts);
 
 /**
  * @brief 最优模型查找内核

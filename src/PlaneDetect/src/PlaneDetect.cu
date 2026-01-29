@@ -5,6 +5,10 @@
 #include <thrust/copy.h>
 #include <thrust/distance.h>
 #include <thrust/count.h>
+#include <thrust/sort.h>
+#include <thrust/sequence.h>
+#include <thrust/gather.h>
+#include <thrust/functional.h>
 #include <ctime>
 #include <iostream>
 #include <cmath>
@@ -153,7 +157,7 @@ __device__ inline float evaluatePlaneDistance(
     return numerator / denominator;
 }
 
-// 批量计算内点数
+// 批量计算内点数（粗筛阶段，支持子采样）
 __global__ void countInliersBatch_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
@@ -162,6 +166,7 @@ __global__ void countInliersBatch_Kernel(
     const GPUPlaneModel *batch_models,
     int batch_size,
     float threshold,
+    int stride,  // 采样步长（1=全量，50=2%采样）
     int *batch_inlier_counts)
 {
     int model_id = blockIdx.y;
@@ -171,7 +176,12 @@ __global__ void countInliersBatch_Kernel(
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     int local_count = 0;
 
-    for (int i = thread_id; i < num_remaining; i += blockDim.x * gridDim.x)
+    // 为了避免走样问题，使用基于model_id和thread_id的伪随机偏移
+    // 这样可以打破采样与扫描规律的共振
+    int random_offset = (model_id * 17 + thread_id) % stride;
+    
+    // 使用stride进行子采样，同时保持线程间的负载均衡
+    for (int i = thread_id * stride + random_offset; i < num_remaining; i += blockDim.x * gridDim.x * stride)
     {
         int global_idx = remaining_indices[i];
         if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
@@ -249,6 +259,60 @@ __global__ void findBestModel_Kernel(
     {
         *best_count = shared_counts[0];
         *best_index = shared_indices[0];
+    }
+}
+
+// 精选阶段内点计数内核 - 对Top-K模型全量计数
+__global__ void fineCountInliers_Kernel(
+    const GPUPoint3f *all_points,
+    const int *remaining_indices,
+    int num_remaining,
+    const uint8_t *valid_mask,
+    const GPUPlaneModel *candidate_models,
+    const int *candidate_indices,
+    int k,
+    float threshold,
+    int *fine_inlier_counts)
+{
+    int candidate_id = blockIdx.y;
+    if (candidate_id >= k)
+        return;
+
+    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int local_count = 0;
+
+    // 全量计数（stride=1），对每个候选模型执行100%点云验证
+    for (int i = thread_id; i < num_remaining; i += blockDim.x * gridDim.x)
+    {
+        int global_idx = remaining_indices[i];
+        if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
+        
+        GPUPoint3f point = all_points[global_idx];
+        float dist = evaluatePlaneDistance(point, candidate_models[candidate_id]);
+
+        if (dist < threshold)
+        {
+            local_count++;
+        }
+    }
+
+    // Block内reduce求和
+    __shared__ int shared_counts[256];
+    shared_counts[threadIdx.x] = local_count;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (threadIdx.x < stride)
+        {
+            shared_counts[threadIdx.x] += shared_counts[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0)
+    {
+        atomicAdd(&fine_inlier_counts[candidate_id], shared_counts[0]);
     }
 }
 
@@ -349,6 +413,26 @@ void PlaneDetect<PointT>::initializeGPUMemory(int batch_size)
     d_rand_states_.resize(batch_size);
     d_best_model_index_.resize(1);
     d_best_model_count_.resize(1);
+    
+    // 预分配两阶段RANSAC竞速相关内存（避免循环内resize）
+    // 预分配128，足够处理大部分k值（默认20）
+    const int max_k = 128;
+    if (d_indices_full_.size() < static_cast<size_t>(batch_size))
+    {
+        d_indices_full_.resize(batch_size);
+    }
+    if (d_top_k_indices_.size() < max_k)
+    {
+        d_top_k_indices_.resize(max_k);
+    }
+    if (d_fine_inlier_counts_.size() < max_k)
+    {
+        d_fine_inlier_counts_.resize(max_k);
+    }
+    if (d_candidate_models_.size() < max_k)
+    {
+        d_candidate_models_.resize(max_k);
+    }
 }
 
 template <typename PointT>
@@ -433,11 +517,11 @@ void PlaneDetect<PointT>::launchInitCurandStates(int batch_size)
     dim3 block(256);
     dim3 grid((batch_size + block.x - 1) / block.x);
 
-    initCurandStates_Kernel<<<grid, block>>>(
+    initCurandStates_Kernel<<<grid, block, 0, stream_>>>(
         thrust::raw_pointer_cast(d_rand_states_.data()),
         time(nullptr),
         batch_size);
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
 }
 
 template <typename PointT>
@@ -452,7 +536,7 @@ void PlaneDetect<PointT>::launchSampleAndFitPlanes(int batch_size)
     dim3 block(256);
     dim3 grid((batch_size + block.x - 1) / block.x);
 
-    sampleAndFitPlanes_Kernel<<<grid, block>>>(
+    sampleAndFitPlanes_Kernel<<<grid, block, 0, stream_>>>(
         d_points_buffer_,
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
@@ -460,38 +544,138 @@ void PlaneDetect<PointT>::launchSampleAndFitPlanes(int batch_size)
         thrust::raw_pointer_cast(d_rand_states_.data()),
         batch_size,
         thrust::raw_pointer_cast(d_batch_models_.data()));
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
 }
 template <typename PointT>
 void PlaneDetect<PointT>::launchCountInliersBatch(int batch_size)
 {
     dim3 block(256);
-    dim3 grid_x((d_remaining_indices_.size() + block.x - 1) / block.x);
+    
+    // 计算采样步长：采样率2%时，stride = 1 / 0.02 = 50
+    // 增加防护：如果 ransac_coarse_ratio >= 1.0，则使用全量采样（stride=1）
+    int stride = (params_.ransac_coarse_ratio >= 1.0) ? 1 : std::max(1, static_cast<int>(1.0 / params_.ransac_coarse_ratio));
+    
+    // 关键优化：Grid配置基于采样点数而非全量点数
+    // 这样可以大幅减少启动的blocks数量（从2960降至60，约49倍减少）
+    int num_remaining = static_cast<int>(d_remaining_indices_.size());
+    int sampled_points = (num_remaining + stride - 1) / stride;  // 向上取整
+    int grid_x_size = std::max(1, static_cast<int>((sampled_points + block.x - 1) / block.x));  // 确保至少为1
+    dim3 grid_x(grid_x_size);
     dim3 grid(grid_x.x, batch_size);
+    
+    // 调试输出（仅在详细模式下）
+    if (params_.verbosity > 1)
+    {
+        printf("[launchCountInliersBatch] 优化Grid配置:\n");
+        printf("  num_remaining=%d, stride=%d, sampled_points=%d\n", 
+               num_remaining, stride, sampled_points);
+        printf("  grid_x=%d blocks (优化前: %d blocks, 减少%.1f%%)\n",
+               grid_x.x, (num_remaining + block.x - 1) / block.x,
+               100.0 * (1.0 - (double)grid_x.x / ((num_remaining + block.x - 1) / block.x)));
+        printf("  总blocks: %d (优化前: %d)\n", 
+               grid.x * grid.y, ((num_remaining + block.x - 1) / block.x) * batch_size);
+    }
 
     thrust::fill(d_batch_inlier_counts_.begin(), d_batch_inlier_counts_.end(), 0);
 
-    countInliersBatch_Kernel<<<grid, block>>>(
+    countInliersBatch_Kernel<<<grid, block, 0, stream_>>>(
         d_points_buffer_,
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
-        static_cast<int>(d_remaining_indices_.size()),
-        d_valid_mask_,  // 新增：传入掩码
+        num_remaining,
+        d_valid_mask_,
         thrust::raw_pointer_cast(d_batch_models_.data()),
         batch_size,
         static_cast<float>(params_.plane_distance_threshold),
+        stride,
         thrust::raw_pointer_cast(d_batch_inlier_counts_.data()));
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
 }
 
 template <typename PointT>
 void PlaneDetect<PointT>::launchFindBestModel(int batch_size)
 {
-    findBestModel_Kernel<<<1, 256>>>(
+    findBestModel_Kernel<<<1, 256, 0, stream_>>>(
         thrust::raw_pointer_cast(d_batch_inlier_counts_.data()),
         batch_size,
         thrust::raw_pointer_cast(d_best_model_index_.data()),
         thrust::raw_pointer_cast(d_best_model_count_.data()));
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
+}
+
+template <typename PointT>
+void PlaneDetect<PointT>::launchSelectTopKModels(int k)
+{
+    // 确保预分配的内存足够大（在构造函数中已预分配）
+    int batch_size = static_cast<int>(d_batch_inlier_counts_.size());
+    
+    if (d_indices_full_.size() < static_cast<size_t>(batch_size))
+    {
+        std::cerr << "[launchSelectTopKModels] 错误：d_indices_full_ 预分配内存不足，需要 " << batch_size 
+                  << " 但只有 " << d_indices_full_.size() << std::endl;
+        return;
+    }
+    if (d_top_k_indices_.size() < static_cast<size_t>(k))
+    {
+        std::cerr << "[launchSelectTopKModels] 错误：d_top_k_indices_ 预分配内存不足，需要 " << k 
+                  << " 但只有 " << d_top_k_indices_.size() << std::endl;
+        return;
+    }
+    
+    // 使用预分配的 d_indices_full_ 创建索引序列 [0, 1, 2, ..., batch_size-1]
+    thrust::sequence(d_indices_full_.begin(), d_indices_full_.begin() + batch_size);
+
+    // 按内点数降序排序（使用greater比较器）
+    thrust::sort_by_key(
+        d_batch_inlier_counts_.begin(), 
+        d_batch_inlier_counts_.begin() + batch_size,
+        d_indices_full_.begin(),
+        thrust::greater<int>()
+    );
+
+    // 提取前k个索引（使用copy_n，不resize）
+    thrust::copy_n(d_indices_full_.begin(), k, d_top_k_indices_.begin());
+}
+
+template <typename PointT>
+void PlaneDetect<PointT>::launchFineCountInliersBatch(int k)
+{
+    // 确保预分配的内存足够大
+    if (d_fine_inlier_counts_.size() < static_cast<size_t>(k) ||
+        d_candidate_models_.size() < static_cast<size_t>(k))
+    {
+        std::cerr << "[launchFineCountInliersBatch] 错误：预分配内存不足" << std::endl;
+        return;
+    }
+
+    // 从 d_batch_models_ 中提取候选模型
+    // 使用 thrust::gather 高效提取
+    thrust::gather(
+        d_top_k_indices_.begin(),
+        d_top_k_indices_.begin() + k,
+        d_batch_models_.begin(),
+        d_candidate_models_.begin()
+    );
+
+    // 清零精选计数数组
+    thrust::fill_n(d_fine_inlier_counts_.begin(), k, 0);
+
+    // 启动精选kernel
+    dim3 block(256);
+    dim3 grid_x((d_remaining_indices_.size() + block.x - 1) / block.x);
+    dim3 grid(grid_x.x, k);  // Y维度对应k个候选模型
+
+    fineCountInliers_Kernel<<<grid, block, 0, stream_>>>(
+        d_points_buffer_,
+        thrust::raw_pointer_cast(d_remaining_indices_.data()),
+        static_cast<int>(d_remaining_indices_.size()),
+        d_valid_mask_,
+        thrust::raw_pointer_cast(d_candidate_models_.data()),
+        thrust::raw_pointer_cast(d_top_k_indices_.data()),
+        k,
+        static_cast<float>(params_.plane_distance_threshold),
+        thrust::raw_pointer_cast(d_fine_inlier_counts_.data()));
+    
+    cudaStreamSynchronize(stream_);
 }
 
 template <typename PointT>
@@ -513,7 +697,7 @@ void PlaneDetect<PointT>::launchExtractInliers(const GPUPlaneModel *model)
     dim3 block(256);
     dim3 grid((d_remaining_indices_.size() + block.x - 1) / block.x);
 
-    extractInliers_Kernel<<<grid, block>>>(
+    extractInliers_Kernel<<<grid, block, 0, stream_>>>(
         d_points_buffer_,
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
@@ -522,7 +706,7 @@ void PlaneDetect<PointT>::launchExtractInliers(const GPUPlaneModel *model)
         static_cast<float>(params_.plane_distance_threshold),
         thrust::raw_pointer_cast(d_temp_inlier_indices_.data()),
         thrust::raw_pointer_cast(d_inlier_count.data()));
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
 
     // 安全获取内点数量
     int h_count_temp = 0;
