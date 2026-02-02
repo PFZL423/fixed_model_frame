@@ -5,8 +5,6 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/common/transforms.h>
 #include <geometry_msgs/Point.h>
 #include <std_msgs/ColorRGBA.h>
@@ -17,19 +15,24 @@
 
 #include "PlaneDetect/PlaneDetect.h"
 #include "super_voxel/supervoxel.h"
+#include "gpu_demo/GPUPreprocessor.h"
+#include <cuda_runtime.h>
 #include <map>  // 用于帧同步
 
 class PlaneSupervoxelNode
 {
 public:
     PlaneSupervoxelNode(ros::NodeHandle &nh, ros::NodeHandle &pnh)
-        : nh_(nh), pnh_(pnh), plane_detector_(nullptr), current_frame_seq_(0)
+        : nh_(nh), pnh_(pnh), plane_detector_(nullptr), current_frame_seq_(0), shared_stream_(nullptr)
     {
         // 读取参数
         loadParameters();
 
         // 初始化平面检测器
         initializePlaneDetector();
+
+        // 初始化 GPU 预处理器和共享 CUDA 流
+        initializeGPUPreprocessor();
 
         // 初始化超体素处理器
         initializeSupervoxelProcessor();
@@ -38,6 +41,16 @@ public:
         setupPubSub();
 
         ROS_INFO("PlaneSupervoxelNode (Node 1) initialized successfully");
+    }
+
+    ~PlaneSupervoxelNode()
+    {
+        // 销毁 CUDA 流
+        if (shared_stream_ != nullptr)
+        {
+            cudaStreamDestroy(shared_stream_);
+            shared_stream_ = nullptr;
+        }
     }
 
 private:
@@ -55,6 +68,10 @@ private:
 
     std::unique_ptr<PlaneDetect<pcl::PointXYZI>> plane_detector_;
     DetectorParams detector_params_;
+
+    // GPU 预处理器和流
+    std::shared_ptr<GPUPreprocessor> gpu_preprocessor_;
+    cudaStream_t shared_stream_;
 
     // 超体素处理器
     std::unique_ptr<super_voxel::SupervoxelProcessor> sv_processor_;
@@ -192,6 +209,26 @@ private:
         ROS_INFO("PlaneDetector initialized with batch_size=%d", detector_params_.batch_size);
     }
 
+    void initializeGPUPreprocessor()
+    {
+        // 初始化 GPU 预处理器
+        gpu_preprocessor_ = std::make_shared<GPUPreprocessor>();
+
+        // 创建共享 CUDA 流
+        cudaError_t err = cudaStreamCreate(&shared_stream_);
+        if (err != cudaSuccess)
+        {
+            ROS_ERROR("Failed to create CUDA stream: %s", cudaGetErrorString(err));
+            throw std::runtime_error("CUDA stream creation failed");
+        }
+
+        // 配置共享流（关键：确保串行无锁流水线）
+        gpu_preprocessor_->setStream(shared_stream_);
+        plane_detector_->setStream(shared_stream_);
+
+        ROS_INFO("GPUPreprocessor initialized with shared CUDA stream");
+    }
+
     void initializeSupervoxelProcessor()
     {
         if (enable_supervoxel_)
@@ -247,59 +284,70 @@ private:
             return;
         }
 
-        // 体素降采样（可选）
-        pcl::PointCloud<pcl::PointXYZI>::Ptr processed_cloud = input_cloud;
-        if (enable_voxel_filter_)
+        // ========== Step 1: GPU 预处理（体素下采样 + 离群点移除）==========
+        // 转换为 PointXYZ（GPUPreprocessor 当前只支持 PointXYZ）
+        pcl::PointCloud<pcl::PointXYZ>::Ptr input_xyz(new pcl::PointCloud<pcl::PointXYZ>);
+        input_xyz->reserve(input_cloud->size());
+        for (const auto &pt : input_cloud->points)
         {
-            processed_cloud.reset(new pcl::PointCloud<pcl::PointXYZI>);
-            pcl::VoxelGrid<pcl::PointXYZI> voxel_filter;
-            voxel_filter.setInputCloud(input_cloud);
-            voxel_filter.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
-            voxel_filter.filter(*processed_cloud);
-
-            ROS_INFO("Voxel filtering: %zu -> %zu points (减少了%.1f%%)",
-                     input_cloud->size(), processed_cloud->size(),
-                     100.0 * (1.0 - (double)processed_cloud->size() / input_cloud->size()));
+            if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
+            {
+                input_xyz->push_back(pcl::PointXYZ(pt.x, pt.y, pt.z));
+            }
         }
-        else
+        input_xyz->width = input_xyz->size();
+        input_xyz->height = 1;
+        input_xyz->is_dense = true;
+
+        // 配置 GPU 预处理参数
+        PreprocessConfig gpu_config;
+        gpu_config.enable_voxel_filter = enable_voxel_filter_;
+        gpu_config.voxel_size = static_cast<float>(voxel_leaf_size_);
+        gpu_config.enable_outlier_removal = enable_outlier_removal_;
+        gpu_config.outlier_method = PreprocessConfig::STATISTICAL;
+        gpu_config.statistical_k = outlier_k_neighbors_;
+        gpu_config.statistical_stddev = static_cast<float>(outlier_std_dev_thresh_);
+        gpu_config.compute_normals = false;  // 平面检测不需要法线
+
+        // 执行 GPU 预处理（数据已在 GPU 上）
+        auto gpu_preprocess_start = std::chrono::high_resolution_clock::now();
+        ProcessingResult gpu_result = gpu_preprocessor_->process(input_xyz, gpu_config);
+        auto gpu_preprocess_end = std::chrono::high_resolution_clock::now();
+        float gpu_preprocess_time = std::chrono::duration<float, std::milli>(
+            gpu_preprocess_end - gpu_preprocess_start).count();
+
+        // 输出 GPU 预处理性能统计
+        const auto &gpu_stats = gpu_preprocessor_->getLastStats();
+        ROS_INFO("GPU preprocessing: %.2f ms (upload=%.2fms, voxel=%.2fms, outlier=%.2fms), output: %zu points", 
+                 gpu_preprocess_time, gpu_stats.upload_time_ms, gpu_stats.voxel_filter_time_ms,
+                 gpu_stats.outlier_removal_time_ms, gpu_result.getPointCount());
+
+        // ========== Step 2: 零拷贝指针传递 ==========
+        GPUPoint3f* d_points = gpu_preprocessor_->getOutputBuffer();
+        size_t point_count = gpu_preprocessor_->getOutputCount();
+
+        if (d_points == nullptr || point_count == 0)
         {
-            ROS_INFO("Voxel filtering: disabled, keeping %zu points", input_cloud->size());
+            ROS_WARN("GPU preprocessing produced no valid points");
+            return;
         }
 
-        // 离群点移除（可选）
-        if (enable_outlier_removal_)
+        ROS_INFO("Zero-copy: borrowing GPU buffer (%zu points)", point_count);
+
+        // ========== Step 3: 平面检测（零拷贝）==========
+        auto plane_detect_start = std::chrono::high_resolution_clock::now();
+        plane_detector_->findPlanesFromGPU(d_points, point_count);
+        auto plane_detect_end = std::chrono::high_resolution_clock::now();
+        float plane_detect_time = std::chrono::duration<float, std::milli>(
+            plane_detect_end - plane_detect_start).count();
+
+        ROS_INFO("Plane detection (zero-copy): %.2f ms", plane_detect_time);
+
+        // 确保 GPU 操作完成（仅在必要时同步）
+        cudaError_t err = cudaStreamSynchronize(shared_stream_);
+        if (err != cudaSuccess)
         {
-            pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZI>);
-            pcl::StatisticalOutlierRemoval<pcl::PointXYZI> outlier_filter;
-            outlier_filter.setInputCloud(processed_cloud);
-            outlier_filter.setMeanK(outlier_k_neighbors_);
-            outlier_filter.setStddevMulThresh(outlier_std_dev_thresh_);
-            outlier_filter.filter(*filtered_cloud);
-
-            ROS_INFO("Outlier removal: %zu -> %zu points (移除了%zu个离群点)",
-                     processed_cloud->size(), filtered_cloud->size(),
-                     processed_cloud->size() - filtered_cloud->size());
-
-            processed_cloud = filtered_cloud;
-        }
-        else
-        {
-            ROS_INFO("🧹 Outlier removal: disabled");
-        }
-
-    ROS_INFO("Final preprocessed cloud: %zu points ready for plane detection", processed_cloud->size());
-
-        // 平面检测
-        // auto start_time = std::chrono::high_resolution_clock::now();
-
-        bool success = plane_detector_->processCloud(processed_cloud);
-
-        // auto end_time = std::chrono::high_resolution_clock::now();
-        // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-
-        if (!success)
-        {
-            ROS_ERROR("Plane detection failed");
+            ROS_ERROR("CUDA stream synchronization failed: %s", cudaGetErrorString(err));
             return;
         }
 
