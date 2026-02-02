@@ -398,6 +398,15 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
                    h_sample_points.size() * sizeof(GPUPoint3f),
                    cudaMemcpyDeviceToHost);
 
+        // 输出前3个点的xyz坐标
+        std::cout << "    前3个点的坐标:" << std::endl;
+        size_t num_points_to_show = std::min(static_cast<size_t>(3), h_sample_points.size());
+        for (size_t i = 0; i < num_points_to_show; ++i)
+        {
+            const GPUPoint3f &pt = h_sample_points[i];
+            std::cout << "      点[" << i << "]: (" << pt.x << ", " << pt.y << ", " << pt.z << ")" << std::endl;
+        }
+
         int invalid_points = 0;
         for (size_t i = 0; i < h_sample_points.size(); ++i)
         {

@@ -201,6 +201,15 @@ private:
     thrust::device_vector<int> d_voxel_boundaries_;
     thrust::device_vector<uint64_t> d_unique_keys_;
 
+    // 桶排序相关临时缓冲区（预分配，避免运行时分配）
+    thrust::device_vector<int> d_bucket_indices_;      // 桶索引 (大小: max_points_capacity_)
+    thrust::device_vector<int> d_bucket_counts_;       // 桶计数 (大小: num_buckets，默认1024)
+    thrust::device_vector<int> d_bucket_offsets_;      // 桶偏移 (大小: num_buckets)
+    thrust::device_vector<int> d_bucket_positions_;   // 桶位置计数器 (大小: num_buckets)
+    thrust::device_vector<GPUPoint3f> d_temp_points_sort_;  // 排序临时点缓冲区 (大小: max_points_capacity_)
+    thrust::device_vector<uint64_t> d_temp_keys_sort_;      // 排序临时key缓冲区 (大小: max_points_capacity_)
+    thrust::device_vector<uint64_t> d_min_max_keys_;        // min/max key存储 (大小: 2)
+
     // 离群点移除相关
     thrust::device_vector<int> d_neighbor_counts_;
     thrust::device_vector<bool> d_valid_flags_;

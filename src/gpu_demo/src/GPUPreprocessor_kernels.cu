@@ -9,6 +9,9 @@
 #include <thrust/unique.h>
 #include <thrust/gather.h>
 #include <thrust/functional.h>
+#include <thrust/scan.h>
+#include <thrust/execution_policy.h>
+#include <thrust/system/cuda/execution_policy.h>
 #include <iostream>
 #include <numeric>
 #include <chrono>
@@ -282,6 +285,37 @@ void GPUPreprocessor::cuda_initializeMemory(size_t max_points)
     d_temp_points_.reserve(max_points);
     d_output_points_.reserve(max_points);
     d_output_points_normal_.reserve(max_points);
+
+    // 预分配桶排序缓冲区
+    const int NUM_BUCKETS = 1024;  // 桶数量（可配置，1024足够处理大部分情况）
+    if (d_bucket_indices_.size() < max_points)
+    {
+        d_bucket_indices_.resize(max_points);
+    }
+    if (d_temp_points_sort_.size() < max_points)
+    {
+        d_temp_points_sort_.resize(max_points);
+    }
+    if (d_temp_keys_sort_.size() < max_points)
+    {
+        d_temp_keys_sort_.resize(max_points);
+    }
+    if (d_bucket_counts_.size() < NUM_BUCKETS)
+    {
+        d_bucket_counts_.resize(NUM_BUCKETS);
+    }
+    if (d_bucket_offsets_.size() < NUM_BUCKETS)
+    {
+        d_bucket_offsets_.resize(NUM_BUCKETS);
+    }
+    if (d_bucket_positions_.size() < NUM_BUCKETS)
+    {
+        d_bucket_positions_.resize(NUM_BUCKETS);
+    }
+    if (d_min_max_keys_.size() < 2)
+    {
+        d_min_max_keys_.resize(2);
+    }
 }
 void GPUPreprocessor::cuda_launchVoxelFilter(float voxel_size)
 {
@@ -338,64 +372,142 @@ void GPUPreprocessor::cuda_launchVoxelFilter(float voxel_size)
     auto check_end = std::chrono::high_resolution_clock::now();
     float check_time = std::chrono::duration<float, std::milli>(check_end - check_start).count();
 
-    // Step 4: GPU排序尝试，CPU排序作为最终fallback
+    // ========== Step 4: GPU Bucket Sort (全GPU流程) ==========
     auto sort_start = std::chrono::high_resolution_clock::now();
-    bool sort_success = false;
 
-    // 首先尝试GPU桶排序
-    std::cout << "[INFO] Attempting GPU bucket sort..." << std::endl;
-    if (0)
+    const int NUM_BUCKETS = 1024;  // 桶数量
+
+    // 确保临时缓冲区大小足够
+    if (d_bucket_indices_.size() < input_count)
     {
-        sort_success = true;
-        std::cout << "[INFO] GPU bucket sort succeeded" << std::endl;
+        d_bucket_indices_.resize(input_count);
     }
-    else
+    if (d_temp_points_sort_.size() < input_count)
     {
-        std::cerr << "[WARNING] GPU bucket sort failed, trying thrust..." << std::endl;
-
-        // 备用方案：thrust::sort_by_key
-        try
-        {
-            auto keys_first = d_voxel_keys_.begin();
-            auto keys_last = keys_first + input_count;
-            auto values_first = d_temp_points_.begin();
-
-            thrust::sort_by_key(keys_first, keys_last, values_first);
-            sort_success = true;
-            std::cout << "[INFO] GPU sort_by_key succeeded" << std::endl;
-        }
-        catch (const thrust::system::system_error &e)
-        {
-            std::cerr << "[WARNING] Thrust sort_by_key failed: " << e.what() << std::endl;
-
-            // 备用方案：stable_sort_by_key
-            try
-            {
-                thrust::stable_sort_by_key(d_voxel_keys_.begin(),
-                                           d_voxel_keys_.begin() + input_count,
-                                           d_temp_points_.begin());
-                sort_success = true;
-                std::cout << "[INFO] GPU stable_sort_by_key succeeded" << std::endl;
-            }
-            catch (const thrust::system::system_error &e2)
-            {
-                std::cerr << "[WARNING] Stable sort also failed: " << e2.what() << std::endl;
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "[WARNING] Generic exception in GPU sort: " << e.what() << std::endl;
-        }
+        d_temp_points_sort_.resize(input_count);
+    }
+    if (d_temp_keys_sort_.size() < input_count)
+    {
+        d_temp_keys_sort_.resize(input_count);
+    }
+    if (d_bucket_counts_.size() < NUM_BUCKETS)
+    {
+        d_bucket_counts_.resize(NUM_BUCKETS);
+    }
+    if (d_bucket_offsets_.size() < NUM_BUCKETS)
+    {
+        d_bucket_offsets_.resize(NUM_BUCKETS);
+    }
+    if (d_bucket_positions_.size() < NUM_BUCKETS)
+    {
+        d_bucket_positions_.resize(NUM_BUCKETS);
+    }
+    if (d_min_max_keys_.size() < 2)
+    {
+        d_min_max_keys_.resize(2);
     }
 
-    // 最终fallback：CPU排序
-    if (!sort_success)
+    // Step A: 范围分析 - 计算 min/max key
+    // block 已在前面声明，直接使用
+    dim3 grid_range((input_count + block.x - 1) / block.x);
+
+    // 初始化 min/max
+    uint64_t init_min = UINT64_MAX;
+    uint64_t init_max = 0;
+    cudaMemcpyAsync(thrust::raw_pointer_cast(d_min_max_keys_.data()), &init_min, 
+                    sizeof(uint64_t), cudaMemcpyHostToDevice, stream_);
+    cudaMemcpyAsync(thrust::raw_pointer_cast(d_min_max_keys_.data()) + 1, &init_max, 
+                    sizeof(uint64_t), cudaMemcpyHostToDevice, stream_);
+
+    GPUBucketSort::analyzeKeyRangeKernel<<<grid_range, block, 0, stream_>>>(
+        thrust::raw_pointer_cast(d_voxel_keys_.data()),
+        static_cast<int>(input_count),
+        thrust::raw_pointer_cast(d_min_max_keys_.data()),
+        thrust::raw_pointer_cast(d_min_max_keys_.data()) + 1);
+
+    // 下载 min/max (需要同步，因为后续步骤依赖)
+    cudaStreamSynchronize(stream_);
+    uint64_t min_key, max_key;
+    cudaMemcpy(&min_key, thrust::raw_pointer_cast(d_min_max_keys_.data()), 
+               sizeof(uint64_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&max_key, thrust::raw_pointer_cast(d_min_max_keys_.data()) + 1, 
+               sizeof(uint64_t), cudaMemcpyDeviceToHost);
+
+    uint64_t key_range = (max_key > min_key) ? (max_key - min_key) : 1;
+
+    // Step B: 计算桶索引
+    dim3 grid_bucket((input_count + block.x - 1) / block.x);
+    GPUBucketSort::computeBucketIndicesKernel<<<grid_bucket, block, 0, stream_>>>(
+        thrust::raw_pointer_cast(d_voxel_keys_.data()),
+        thrust::raw_pointer_cast(d_bucket_indices_.data()),
+        static_cast<int>(input_count),
+        min_key,
+        key_range,
+        NUM_BUCKETS);
+
+    // Step C: 统计桶大小
+    thrust::fill(thrust::cuda::par.on(stream_), 
+                 d_bucket_counts_.begin(), d_bucket_counts_.begin() + NUM_BUCKETS, 0);
+
+    dim3 grid_count((input_count + block.x - 1) / block.x);
+    GPUBucketSort::countBucketSizesKernel<<<grid_count, block, 0, stream_>>>(
+        thrust::raw_pointer_cast(d_bucket_indices_.data()),
+        thrust::raw_pointer_cast(d_bucket_counts_.data()),
+        static_cast<int>(input_count),
+        NUM_BUCKETS);
+
+    // Step D: 前缀和扫描计算桶偏移量
+    thrust::exclusive_scan(thrust::cuda::par.on(stream_),
+                           d_bucket_counts_.begin(), 
+                           d_bucket_counts_.begin() + NUM_BUCKETS,
+                           d_bucket_offsets_.begin(),
+                           0);
+
+    // Step E: 全局重排（关键优化点，消除224ms CPU重排）
+    thrust::fill(thrust::cuda::par.on(stream_),
+                 d_bucket_positions_.begin(), d_bucket_positions_.begin() + NUM_BUCKETS, 0);
+
+    dim3 grid_distribute((input_count + block.x - 1) / block.x);
+    GPUBucketSort::distributeToBucketsKernel<<<grid_distribute, block, 0, stream_>>>(
+        thrust::raw_pointer_cast(d_temp_points_.data()),
+        thrust::raw_pointer_cast(d_voxel_keys_.data()),
+        thrust::raw_pointer_cast(d_bucket_indices_.data()),
+        thrust::raw_pointer_cast(d_bucket_offsets_.data()),
+        thrust::raw_pointer_cast(d_temp_points_sort_.data()),
+        thrust::raw_pointer_cast(d_temp_keys_sort_.data()),
+        thrust::raw_pointer_cast(d_bucket_positions_.data()),
+        static_cast<int>(input_count));
+
+    // 交换缓冲区（使用swap避免拷贝）
+    d_temp_points_.swap(d_temp_points_sort_);
+    d_voxel_keys_.swap(d_temp_keys_sort_);
+
+    // Step F: 桶内精排（使用基数排序）
+    dim3 grid_radix(NUM_BUCKETS, 1);  // 每个桶一个block
+    dim3 block_radix(32);  // 每个block 32个线程（一个warp）
+
+    GPUBucketSort::radixSortWithinBucketsKernel<<<grid_radix, block_radix, 0, stream_>>>(
+        thrust::raw_pointer_cast(d_temp_points_.data()),
+        thrust::raw_pointer_cast(d_voxel_keys_.data()),
+        thrust::raw_pointer_cast(d_temp_points_sort_.data()),
+        thrust::raw_pointer_cast(d_temp_keys_sort_.data()),
+        thrust::raw_pointer_cast(d_bucket_offsets_.data()),
+        thrust::raw_pointer_cast(d_bucket_counts_.data()),
+        NUM_BUCKETS);
+
+    // 最终交换回排序后的数据
+    d_temp_points_.swap(d_temp_points_sort_);
+    d_voxel_keys_.swap(d_temp_keys_sort_);
+
+    // 确保所有异步操作完成
+    cudaStreamSynchronize(stream_);
+
+    // 错误检查
+    cudaError_t sort_error = cudaGetLastError();
+    if (sort_error != cudaSuccess)
     {
-        std::cout << "[INFO] Falling back to CPU sort..." << std::endl;
-        if (!cpuFallbackSort(input_count))
-        {
-            return;
-        }
+        std::cerr << "[ERROR] GPU Bucket Sort failed: " << cudaGetErrorString(sort_error) << std::endl;
+        return;
     }
 
     auto sort_end = std::chrono::high_resolution_clock::now();
@@ -416,7 +528,7 @@ void GPUPreprocessor::cuda_launchVoxelFilter(float voxel_size)
     std::cout << "  Memory setup: " << memory_time << " ms" << std::endl;
     std::cout << "  Kernel compute: " << kernel_time << " ms" << std::endl;
     std::cout << "  Size check: " << check_time << " ms" << std::endl;
-    std::cout << "  CPU sort: " << sort_time << " ms" << std::endl;
+    std::cout << "  GPU Bucket Sort: " << sort_time << " ms" << std::endl;
     std::cout << "  Process centroids: " << process_time << " ms" << std::endl;
     std::cout << "  Total: " << total_time << " ms" << std::endl;
 }

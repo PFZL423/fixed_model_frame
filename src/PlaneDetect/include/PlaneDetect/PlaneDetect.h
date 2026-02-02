@@ -209,6 +209,12 @@ public:
      */
     void findPlanesFromGPU(GPUPoint3f* d_external_points, size_t count);
 
+    /**
+     * @brief 显式释放外部显存缓冲区，恢复内部预分配缓冲区
+     * 在零拷贝模式下，调用此函数将 d_points_buffer_ 重新指向内部预分配的缓冲区
+     * 应在 getFinalCloud() 完成并发布消息之后调用
+     */
+    void releaseExternalBuffer();
 
 private:
     // 添加临时存储成员变量

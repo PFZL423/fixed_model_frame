@@ -206,6 +206,54 @@ namespace Utils
         GPUPointNormal3f *points_with_normals,
         int point_count);
 }
+
+// ========== GPU 桶排序相关 ==========
+namespace GPUBucketSort
+{
+    // Step 1: 分析key分布，确定桶的范围
+    __global__ void analyzeKeyRangeKernel(
+        const uint64_t *keys,
+        int count,
+        uint64_t *min_key,
+        uint64_t *max_key);
+
+    // Step 2: 计算每个点属于哪个桶
+    __global__ void computeBucketIndicesKernel(
+        const uint64_t *keys,
+        int *bucket_indices,
+        int count,
+        uint64_t min_key,
+        uint64_t key_range,
+        int num_buckets);
+
+    // Step 3: 统计每个桶的大小
+    __global__ void countBucketSizesKernel(
+        const int *bucket_indices,
+        int *bucket_counts,
+        int count,
+        int num_buckets);
+
+    // Step 5: 将数据分配到各个桶
+    __global__ void distributeToBucketsKernel(
+        const GPUPoint3f *input_points,
+        const uint64_t *input_keys,
+        const int *bucket_indices,
+        const int *bucket_offsets,
+        GPUPoint3f *output_points,
+        uint64_t *output_keys,
+        int *bucket_positions,
+        int count);
+
+    // Step 6: 对每个桶内部排序（使用基数排序）
+    __global__ void radixSortWithinBucketsKernel(
+        GPUPoint3f *points,
+        uint64_t *keys,
+        GPUPoint3f *temp_points,
+        uint64_t *temp_keys,
+        const int *bucket_offsets,
+        const int *bucket_counts,
+        int num_buckets);
+}
 namespace SpatialHashOutlier {
     
     // 离群点移除kernel

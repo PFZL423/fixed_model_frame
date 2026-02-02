@@ -403,6 +403,10 @@ private:
         plane_remaining_pub_.publish(plane_remaining_msg);
         ROS_INFO("📤 [Node1] Published plane remaining cloud (%zu points) to /plane_remaining (frame %u)", 
                  remaining_cloud->size(), plane_remaining_msg.header.seq);
+
+        // 关键修复：在 getFinalCloud() 完成并发布消息之后，显式释放外部显存缓冲区
+        // 这确保 d_points_buffer_ 恢复指向内部预分配缓冲区，避免指针过早释放导致的 Bug
+        plane_detector_->releaseExternalBuffer();
     }
 
     // 回调2：接收节点2处理后的点云，进行超体素处理

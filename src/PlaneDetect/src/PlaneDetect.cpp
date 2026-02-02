@@ -678,10 +678,33 @@ void PlaneDetect<PointT>::findPlanesFromGPU(GPUPoint3f* d_external_points, size_
     // Step 5: 核心计算
     findPlanes_BatchGPU();
 
-    // Step 6: 现场恢复
+    // 注意：不再在此处恢复指针！
+    // d_points_buffer_ 将一直指向外部显存，直到显式调用 releaseExternalBuffer()
+    // 这确保了 getFinalCloud() 和 downloadCompactPoints() 可以安全访问外部显存数据
+}
+
+template <typename PointT>
+void PlaneDetect<PointT>::releaseExternalBuffer()
+{
+    // 只有在使用外部显存时才需要恢复
+    if (!is_external_memory_ || d_points_backup_ == nullptr)
+    {
+        if (params_.verbosity > 1)
+        {
+            std::cout << "[releaseExternalBuffer] 未处于外部显存模式，无需恢复" << std::endl;
+        }
+        return;
+    }
+
+    // 恢复内部预分配的缓冲区指针
     d_points_buffer_ = d_points_backup_;
     is_external_memory_ = false;
     d_points_backup_ = nullptr;
+
+    if (params_.verbosity > 1)
+    {
+        std::cout << "[releaseExternalBuffer] 已恢复内部预分配缓冲区" << std::endl;
+    }
 }
 
 // 显式模板实例化
