@@ -43,7 +43,7 @@ __global__ void sampleAndBuildMatrices_Kernel(
         sample_indices[i] = remaining_indices[curand(&local_state) % num_remaining];
     }
 
-    // 构造9x10的A矩阵 (🔧 修复：按列主序存储，符合cuSolver要求)
+    // 构造9x10的A矩阵 ( 修复：按列主序存储，符合cuSolver要求)
     float *A = &batch_matrices[model_id * 90]; // 9*10
 
     for (int i = 0; i < 9; ++i)
@@ -51,18 +51,18 @@ __global__ void sampleAndBuildMatrices_Kernel(
         GPUPoint3f pt = all_points[sample_indices[i]];
         float x = pt.x, y = pt.y, z = pt.z;
 
-        // 🔧 关键修复：检查并处理无效的点云数据
+        //  关键修复：检查并处理无效的点云数据
         if (!isfinite(x) || !isfinite(y) || !isfinite(z) ||
             isnan(x) || isnan(y) || isnan(z) ||
             isinf(x) || isinf(y) || isinf(z))
         {
-            // 🚨 发现无效点，用默认值替换
+            //  发现无效点，用默认值替换
             x = 0.0f;
             y = 0.0f;
             z = 0.0f;
         }
 
-        // 🎯 关键修复：列主序存储 A[col * m + row]
+        //  关键修复：列主序存储 A[col * m + row]
         A[0 * 9 + i] = x * x; // x² (第0列)
         A[1 * 9 + i] = y * y; // y² (第1列)
         A[2 * 9 + i] = z * z; // z² (第2列)
@@ -74,7 +74,7 @@ __global__ void sampleAndBuildMatrices_Kernel(
         A[8 * 9 + i] = z;     // z  (第8列)
         A[9 * 9 + i] = 1.0f;  // 常数项 (第9列)
 
-        // 🔧 二次验证：确保生成的值都是有效的
+        //  二次验证：确保生成的值都是有效的
         for (int col = 0; col < 10; ++col)
         {
             float val = A[col * 9 + i];
@@ -142,7 +142,7 @@ __device__ inline float evaluateQuadricDistance(
 {
     float x = point.x, y = point.y, z = point.z;
 
-    // 🔧 修复开始：添加输入验证
+    //  修复开始：添加输入验证
     // 验证输入点的有效性
     if (!isfinite(x) || !isfinite(y) || !isfinite(z) ||
         isnan(x) || isnan(y) || isnan(z) ||
@@ -166,22 +166,22 @@ __device__ inline float evaluateQuadricDistance(
     {
         return 1e10f; // 返回一个很大的距离，表示无效模型
     }
-    // 🔧 修复结束
+    //  修复结束
 
     // 手写二次型计算: [x y z 1] * Q * [x y z 1]^T
     float result = 0.0f;
     float coords[4] = {x, y, z, 1.0f};
 
-    // 🔧 修复：使用更安全的矩阵乘法，避免潜在的内存访问问题
+    //  修复：使用更安全的矩阵乘法，避免潜在的内存访问问题
     for (int i = 0; i < 4; ++i)
     {
         for (int j = 0; j < 4; ++j)
         {
             int idx = i * 4 + j;      // 确保索引在有效范围内
-            if (idx >= 0 && idx < 16) // 🔧 添加边界检查
+            if (idx >= 0 && idx < 16) //  添加边界检查
             {
                 float coeff = model.coeffs[idx];
-                // 🔧 验证每次乘法的结果
+                //  验证每次乘法的结果
                 float term = coords[i] * coeff * coords[j];
                 if (isfinite(term) && !isnan(term) && !isinf(term))
                 {
@@ -191,7 +191,7 @@ __device__ inline float evaluateQuadricDistance(
         }
     }
 
-    // 🔧 修复：验证最终结果的有效性
+    //  修复：验证最终结果的有效性
     if (!isfinite(result) || isnan(result) || isinf(result))
     {
         return 1e10f; // 返回一个很大的距离，表示计算失败
@@ -261,7 +261,7 @@ __global__ void extractInliers_Kernel(
     if (idx >= num_remaining)
         return;
 
-    // 🔧 修复开始：添加更多安全检查
+    //  修复开始：添加更多安全检查
     // 检查输入参数有效性
     if (all_points == nullptr || remaining_indices == nullptr ||
         model == nullptr || inlier_indices == nullptr || inlier_count == nullptr)
@@ -276,12 +276,12 @@ __global__ void extractInliers_Kernel(
         return; // 无效的点索引
     }
 
-    // 🔧 关键修复：确保我们不访问超出all_points数组边界的内存
+        //  关键修复：确保我们不访问超出all_points数组边界的内存
     // 注意：我们无法在GPU内核中直接获取all_points的大小，所以需要依赖调用方确保索引有效
 
     GPUPoint3f point = all_points[global_point_index];
 
-    // 🔧 验证点的有效性
+    //  验证点的有效性
     if (!isfinite(point.x) || !isfinite(point.y) || !isfinite(point.z) ||
         isnan(point.x) || isnan(point.y) || isnan(point.z) ||
         isinf(point.x) || isinf(point.y) || isinf(point.z))
@@ -291,19 +291,19 @@ __global__ void extractInliers_Kernel(
 
     float dist = evaluateQuadricDistance(point, *model);
 
-    // 🔧 验证距离计算结果的有效性
+    //  验证距离计算结果的有效性
     if (!isfinite(dist) || isnan(dist) || isinf(dist))
     {
         return; // 跳过无效距离计算结果
     }
-    // 🔧 修复结束
+    //  修复结束
 
     if (dist < threshold)
     {
-        // 🔧 修复开始：添加边界检查防止数组越界
+        //  修复开始：添加边界检查防止数组越界
         int write_pos = atomicAdd(inlier_count, 1);
 
-        // 🔧 关键安全检查：确保不会越界访问
+        //  关键安全检查：确保不会越界访问
         // 理论上 d_temp_inlier_indices_ 大小等于 d_remaining_indices_.size()
         // 所以 write_pos 应该永远 < num_remaining，但为了安全还是检查
         if (write_pos < num_remaining)
@@ -312,11 +312,11 @@ __global__ void extractInliers_Kernel(
         }
         else
         {
-            // 🚨 如果发生越界，至少不会崩溃，但会丢失这个内点
+            //  如果发生越界，至少不会崩溃，但会丢失这个内点
             // 在实际应用中这种情况不应该发生
             atomicAdd(inlier_count, -1); // 回滚计数器
         }
-        // 🔧 修复结束
+        //  修复结束
     }
 } // ========================================
 // 成员函数实现 (每个函数只定义一次!)
@@ -334,7 +334,7 @@ void QuadricDetect::initializeGPUMemory(int batch_size)
     d_best_model_index_.resize(1);
     d_best_model_count_.resize(1);
 
-    // 🆕 添加反幂迭代相关
+    //  添加反幂迭代相关
     d_batch_ATA_matrices_.resize(batch_size * 10 * 10);
     d_batch_R_matrices_.resize(batch_size * 10 * 10);
     d_batch_eigenvectors_.resize(batch_size * 10);
@@ -373,23 +373,23 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         std::cout << "  - 总点数: " << d_all_points_.size() << std::endl;
     }
 
-    // 🔍 验证输入数据
+    //  验证输入数据
     if (d_remaining_indices_.size() < 9)
     {
-        std::cerr << "[launchSampleAndBuildMatrices] 🚨 错误：剩余点数不足9个，无法生成矩阵！" << std::endl;
+        std::cerr << "[launchSampleAndBuildMatrices]  错误：剩余点数不足9个，无法生成矩阵！" << std::endl;
         return;
     }
 
     if (d_all_points_.size() == 0)
     {
-        std::cerr << "[launchSampleAndBuildMatrices] 🚨 错误：点云数据为空！" << std::endl;
+        std::cerr << "[launchSampleAndBuildMatrices]  错误：点云数据为空！" << std::endl;
         return;
     }
 
-    // 🔧 新增：验证点云数据的有效性
+            //  新增：验证点云数据的有效性
     if (params_.verbosity > 1)
     {
-        std::cout << "[launchSampleAndBuildMatrices] 🔍 验证输入点云数据有效性..." << std::endl;
+        std::cout << "[launchSampleAndBuildMatrices]  验证输入点云数据有效性..." << std::endl;
 
         // 检查前几个点的数据
         thrust::host_vector<GPUPoint3f> h_sample_points(std::min(10, (int)d_all_points_.size()));
@@ -407,14 +407,14 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
                 std::isinf(pt.x) || std::isinf(pt.y) || std::isinf(pt.z))
             {
                 invalid_points++;
-                std::cout << "    🚨 发现无效点[" << i << "]: ("
+                std::cout << "    发现无效点[" << i << "]: ("
                           << pt.x << ", " << pt.y << ", " << pt.z << ")" << std::endl;
             }
         }
 
         if (invalid_points > 0)
         {
-            std::cout << "    🚨 警告：输入点云包含 " << invalid_points << " 个无效点！" << std::endl;
+            std::cout << "    警告：输入点云包含 " << invalid_points << " 个无效点！" << std::endl;
             std::cout << "    这可能导致SVD计算失败，建议预处理点云数据" << std::endl;
         }
         else
@@ -426,7 +426,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     dim3 block(256);
     dim3 grid((batch_size + block.x - 1) / block.x);
 
-    // 🔍 先清零矩阵数据，确保没有垃圾数据
+    //  先清零矩阵数据，确保没有垃圾数据
     thrust::fill(d_batch_matrices_.begin(), d_batch_matrices_.end(), 0.0f);
 
     sampleAndBuildMatrices_Kernel<<<grid, block, 0, stream_>>>(
@@ -440,7 +440,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     cudaError_t kernel_error = cudaGetLastError();
     if (kernel_error != cudaSuccess)
     {
-        std::cerr << "[launchSampleAndBuildMatrices] 🚨 内核启动错误: " << cudaGetErrorString(kernel_error) << std::endl;
+        std::cerr << "[launchSampleAndBuildMatrices]  内核启动错误: " << cudaGetErrorString(kernel_error) << std::endl;
         return;
     }
 
@@ -449,11 +449,11 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     cudaError_t sync_error = cudaGetLastError();
     if (sync_error != cudaSuccess)
     {
-        std::cerr << "[launchSampleAndBuildMatrices] 🚨 内核执行错误: " << cudaGetErrorString(sync_error) << std::endl;
+        std::cerr << "[launchSampleAndBuildMatrices]  内核执行错误: " << cudaGetErrorString(sync_error) << std::endl;
         return;
     }
 
-    // 🔍 验证生成的矩阵数据
+    //  验证生成的矩阵数据
     if (params_.verbosity > 1)
     {
         std::cout << "[launchSampleAndBuildMatrices] 验证生成的矩阵..." << std::endl;
@@ -477,9 +477,9 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
 
         if (all_zero)
         {
-            std::cerr << "[launchSampleAndBuildMatrices] 🚨 生成的矩阵全为零！检查内核实现" << std::endl;
+            std::cerr << "[launchSampleAndBuildMatrices]  生成的矩阵全为零！检查内核实现" << std::endl;
 
-            // 🔍 检查输入点云数据
+            //  检查输入点云数据
             thrust::host_vector<GPUPoint3f> h_points_sample(std::min(10, (int)d_all_points_.size()));
             cudaMemcpy(h_points_sample.data(),
                        thrust::raw_pointer_cast(d_all_points_.data()),
@@ -494,7 +494,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
                           << ", " << h_points_sample[i].z << ")" << std::endl;
             }
 
-            // 🔍 检查剩余索引
+            //  检查剩余索引
             thrust::host_vector<int> h_indices_sample(std::min(10, (int)d_remaining_indices_.size()));
             cudaMemcpy(h_indices_sample.data(),
                        thrust::raw_pointer_cast(d_remaining_indices_.data()),
@@ -587,11 +587,11 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
     std::cout << "  - 总点数: " << d_all_points_.size() << std::endl;
     std::cout << "  - 距离阈值: " << params_.quadric_distance_threshold << std::endl;
 
-    // 🔧 关键修复：将model从CPU拷贝到GPU专用内存
+    //  关键修复：将model从CPU拷贝到GPU专用内存
     thrust::device_vector<GPUQuadricModel> d_model_safe(1);
     d_model_safe[0] = *model; // 安全拷贝
     // std::cout << "debug1.5 - 模型已安全拷贝到GPU" << std::endl;
-    // 🔧 修复结束
+        //  修复结束
 
     // 分配临时GPU内存存储内点索引
     d_temp_inlier_indices_.resize(d_remaining_indices_.size());
@@ -604,12 +604,12 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
     dim3 grid((d_remaining_indices_.size() + block.x - 1) / block.x);
     // std::cout << "debug3.5 - Grid配置: " << grid.x << " blocks, " << block.x << " threads" << std::endl;
 
-    // 🔧 修复：使用安全的GPU内存而不是CPU指针
+    //  修复：使用安全的GPU内存而不是CPU指针
     extractInliers_Kernel<<<grid, block, 0, stream_>>>(
         thrust::raw_pointer_cast(d_all_points_.data()),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
-        thrust::raw_pointer_cast(d_model_safe.data()), // 🔧 使用GPU内存
+        thrust::raw_pointer_cast(d_model_safe.data()), //  使用GPU内存
         static_cast<float>(params_.quadric_distance_threshold),
         thrust::raw_pointer_cast(d_temp_inlier_indices_.data()),
         thrust::raw_pointer_cast(d_inlier_count.data()));
@@ -618,7 +618,7 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
     cudaStreamSynchronize(stream_);
     // std::cout << "debug5" << std::endl;
 
-    // 🔧 修复开始：使用更安全的内存访问方法替代thrust::copy
+    //  修复开始：使用更安全的内存访问方法替代thrust::copy
     // 检查内核执行是否有错误
     cudaError_t kernel_error = cudaGetLastError();
     if (kernel_error != cudaSuccess)
@@ -634,7 +634,7 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
     // thrust::host_vector<int> h_count(1);
     // thrust::copy(d_inlier_count.begin(), d_inlier_count.end(), h_count.begin());
 
-    // 🔧 新方案：使用原生cudaMemcpy，更安全可控
+    //  新方案：使用原生cudaMemcpy，更安全可控
     int h_count_temp = 0;
     cudaError_t copy_error = cudaMemcpy(&h_count_temp,
                                         thrust::raw_pointer_cast(d_inlier_count.data()),
@@ -643,13 +643,13 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
 
     if (copy_error != cudaSuccess)
     {
-        std::cerr << "[launchExtractInliers] 🚨 内存拷贝错误: " << cudaGetErrorString(copy_error) << std::endl;
+        std::cerr << "[launchExtractInliers]  内存拷贝错误: " << cudaGetErrorString(copy_error) << std::endl;
         current_inlier_count_ = 0;
         return;
     }
 
     current_inlier_count_ = h_count_temp;
-    // 🔧 修复结束
+            //  修复结束
 
     // std::cout << "debug6" << std::endl;
 
@@ -1062,7 +1062,7 @@ __global__ void extractQuadricModels_Kernel(
 }
 
 // 包装函数
-// 🆕 添加到QuadricDetect.cu
+//  添加到QuadricDetect.cu
 
 void QuadricDetect::launchComputeATA(int batch_size)
 {

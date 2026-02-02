@@ -26,13 +26,13 @@ bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr
     if (!input_cloud || input_cloud->empty())
         return false;
 
-    //  🔧 终极修复：完全同步所有CUDA设备并清除任何潜在错误
+    //  关键修复：完全同步所有CUDA设备并清除任何潜在错误
     // cudaDeviceSynchronize();  // 等待所有之前的CUDA操作完成
     // cudaGetLastError();        // 清除之前可能存在的CUDA错误状态
     
     auto total_start = std::chrono::high_resolution_clock::now();
 
-    // 🔧 关键修复：清空所有GPU状态（防止多帧复用时的数据残留）
+    //  关键修复：清空所有GPU状态（防止多帧复用时的数据残留）
     detected_primitives_.clear();
     d_batch_inlier_counts_.clear();
     d_batch_models_.clear();
@@ -54,7 +54,7 @@ bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr
     auto total_end = std::chrono::high_resolution_clock::now();
     float total_time = std::chrono::duration<float, std::milli>(total_end - total_start).count();
 
-    // 🔧 关键修复：确保所有 GPU 操作完成
+    //  关键修复：确保所有 GPU 操作完成
     cudaStreamSynchronize(stream_);
     cudaDeviceSynchronize();
     
@@ -79,7 +79,7 @@ void QuadricDetect::convertPCLtoGPU(const pcl::PointCloud<pcl::PointXYZI>::Const
 
     for (const auto &pt : cloud->points)
     {
-        // 关键修复：过滤NaN/Inf点
+            // 关键修复：过滤NaN/Inf点
         if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
         {
             GPUPoint3f gpu_pt;
@@ -391,11 +391,11 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::getFinalCloud() const
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr final_cloud(new pcl::PointCloud<pcl::PointXYZI>());
 
-    // 🔧 关键修复：确保所有 GPU 操作完成后再复制数据到 Host
+    //  关键修复：确保所有 GPU 操作完成后再复制数据到 Host
     cudaStreamSynchronize(stream_);
     cudaDeviceSynchronize();  // 全局同步，确保所有设备操作完成
     
-    // 🔍 检查 CUDA 错误状态
+    //  检查 CUDA 错误状态
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         std::cerr << "[getFinalCloud]  CUDA错误在同步后检测到: " 
@@ -407,7 +407,7 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::getFinalCloud() const
         return final_cloud;
     }
     
-    // 🔍 安全的 Device→Host 拷贝，带错误检查
+    //  安全的 Device→Host 拷贝，带错误检查
     thrust::host_vector<int> h_remaining_indices;
     thrust::host_vector<GPUPoint3f> h_all_points;
     
@@ -451,14 +451,14 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
         return inlier_cloud;
     }
 
-    // 🔧 确保 GPU 操作完成
+    //  确保 GPU 操作完成
     cudaStreamSynchronize(stream_);
     cudaDeviceSynchronize();
     
-    // 🔍 检查 CUDA 错误
+    //  检查 CUDA 错误
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        std::cerr << "[extractInlierCloud] ⚠️ CUDA错误: " 
+        std::cerr << "[extractInlierCloud]  CUDA错误: " 
                   << cudaGetErrorString(err) << std::endl;
         return inlier_cloud;
     }
@@ -471,7 +471,7 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
         h_inlier_indices = d_temp_inlier_indices_;
         h_all_points = d_all_points_;
     } catch (const thrust::system_error &e) {
-        std::cerr << "[extractInlierCloud] ❌ Thrust拷贝失败: " << e.what() << std::endl;
+        std::cerr << "[extractInlierCloud]  Thrust拷贝失败: " << e.what() << std::endl;
         err = cudaGetLastError();
         std::cerr << "[extractInlierCloud] CUDA错误: " << cudaGetErrorString(err) << std::endl;
         return inlier_cloud;
