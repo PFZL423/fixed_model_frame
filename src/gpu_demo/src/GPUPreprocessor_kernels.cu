@@ -192,9 +192,9 @@ void GPUPreprocessor::cuda_performNormalEstimation(
     dim3 grid((point_count + block.x - 1) / block.x);
 
     // 直接使用传入的指针，避免device_vector构造
-    NormalEstimation::estimateNormalsKernel<<<grid, block>>>(
+    NormalEstimation::estimateNormalsKernel<<<grid, block, 0, stream_>>>(
         points, points_with_normals, point_count, radius, k);
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
 }
 
 size_t GPUPreprocessor::cuda_compactValidPoints(
@@ -238,9 +238,9 @@ void GPUPreprocessor::cuda_convertToPointsWithNormals(
     dim3 grid((point_count + block.x - 1) / block.x);
 
     // 直接操作指针，避免device_vector构造
-    Utils::convertToPointNormalKernel<<<grid, block>>>(
+    Utils::convertToPointNormalKernel<<<grid, block, 0, stream_>>>(
         input_points, output_points, point_count);
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
 }
 
 // ========== 在.cu文件末尾添加所有GPU内存管理函数 ==========
@@ -304,7 +304,7 @@ void GPUPreprocessor::cuda_launchVoxelFilter(float voxel_size)
     dim3 block(256);
     dim3 grid((input_count + block.x - 1) / block.x);
 
-    VoxelFilter::computeVoxelKeysKernel<<<grid, block>>>(
+    VoxelFilter::computeVoxelKeysKernel<<<grid, block, 0, stream_>>>(
         thrust::raw_pointer_cast(d_temp_points_.data()),
         thrust::raw_pointer_cast(d_voxel_keys_.data()),
         voxel_size,
@@ -316,7 +316,7 @@ void GPUPreprocessor::cuda_launchVoxelFilter(float voxel_size)
         std::cerr << "[ERROR] Voxel kernel failed: " << cudaGetErrorString(kernel_error) << std::endl;
         return;
     }
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
     auto kernel_end = std::chrono::high_resolution_clock::now();
     float kernel_time = std::chrono::duration<float, std::milli>(kernel_end - kernel_start).count();
 
@@ -721,11 +721,11 @@ void GPUPreprocessor::cuda_launchGroundRemoval(float threshold)
     dim3 grid((input_count + block.x - 1) / block.x);
 
     // 重用d_valid_flags_作为ground_flags
-    GroundRemoval::ransacGroundDetectionKernel<<<grid, block>>>(
+    GroundRemoval::ransacGroundDetectionKernel<<<grid, block, 0, stream_>>>(
         thrust::raw_pointer_cast(d_temp_points_.data()),
         thrust::raw_pointer_cast(d_valid_flags_.data()),
         input_count, threshold, 1000);
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream_);
 
     // 直接过滤非地面点
     thrust::device_vector<GPUPoint3f> d_temp_result(input_count);
@@ -788,41 +788,51 @@ void GPUPreprocessor::cuda_compactValidPoints()
     d_temp_points_ = d_output_points_;
 }
 
-void GPUPreprocessor::cuda_uploadGPUPoints(const std::vector<GPUPoint3f> &cpu_points)
+void GPUPreprocessor::cuda_uploadGPUPoints(const GPUPoint3f* h_pinned_points, size_t count)
 {
-    if (cpu_points.empty())
+    if (count == 0 || h_pinned_points == nullptr)
         return;
+
+    if (stream_ == nullptr)
+    {
+        std::cerr << "[ERROR] CUDA stream not initialized" << std::endl;
+        return;
+    }
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    // 直接使用预分配的空间，不再resize
-    size_t required_size = cpu_points.size();
-    if (d_input_points_.size() < required_size)
+    // 确保 d_input_points_ 有足够容量
+    if (d_input_points_.size() < count)
     {
-        std::cerr << "[ERROR] Input size (" << required_size
-                  << ") exceeds pre-allocated capacity (" << d_input_points_.size() << ")" << std::endl;
-        return;
+        d_input_points_.resize(count);
     }
 
-    // 🔥 关键：直接使用原始CUDA内存传输到预分配的空间
-    cudaError_t err = cudaMemcpy(
+    // 🔥 关键：使用异步上传和 pinned memory（DMA直接访问，避免驱动层拷贝）
+    cudaError_t err = cudaMemcpyAsync(
         thrust::raw_pointer_cast(d_input_points_.data()), // 预分配的GPU空间
-        cpu_points.data(),                                // CPU源
-        cpu_points.size() * sizeof(GPUPoint3f),           // 字节数
-        cudaMemcpyHostToDevice                            // 传输方向
+        h_pinned_points,                                  // CPU源（pinned memory）
+        count * sizeof(GPUPoint3f),                        // 字节数
+        cudaMemcpyHostToDevice,                            // 传输方向
+        stream_                                            // 绑定到stream
     );
     if (err != cudaSuccess)
     {
-        std::cerr << "[ERROR] cudaMemcpy failed: " << cudaGetErrorString(err) << std::endl;
+        std::cerr << "[ERROR] cudaMemcpyAsync failed: " << cudaGetErrorString(err) << std::endl;
         return;
     }
 
-    // 🚀 GPU内部拷贝（超快）
-    err = cudaMemcpy(
+    // 🚀 GPU内部拷贝（超快，异步）
+    if (d_temp_points_.size() < count)
+    {
+        d_temp_points_.resize(count);
+    }
+    err = cudaMemcpyAsync(
         thrust::raw_pointer_cast(d_temp_points_.data()),
         thrust::raw_pointer_cast(d_input_points_.data()),
-        cpu_points.size() * sizeof(GPUPoint3f),
-        cudaMemcpyDeviceToDevice);
+        count * sizeof(GPUPoint3f),
+        cudaMemcpyDeviceToDevice,
+        stream_  // 绑定到stream
+    );
     if (err != cudaSuccess)
     {
         std::cerr << "[ERROR] GPU internal copy failed: " << cudaGetErrorString(err) << std::endl;
@@ -830,16 +840,16 @@ void GPUPreprocessor::cuda_uploadGPUPoints(const std::vector<GPUPoint3f> &cpu_po
     }
 
     // 🔧 关键修复：正确设置d_temp_points_的逻辑大小
-    d_temp_points_.resize(cpu_points.size());
+    d_temp_points_.resize(count);
 
-    // 确保传输完成
-    cudaDeviceSynchronize();
+    // 移除同步：保持异步，由调用者决定何时同步
+    // cudaStreamSynchronize(stream_);  // 仅在必要时同步
 
     auto end = std::chrono::high_resolution_clock::now();
     float upload_time = std::chrono::duration<float, std::milli>(end - start).count();
 
-    std::cout << "[GPUPreprocessor] ⚡ FAST upload: " << cpu_points.size()
-              << " points in " << upload_time << " ms (pre-allocated)" << std::endl;
+    std::cout << "[GPUPreprocessor] ⚡ ASYNC upload: " << count
+              << " points in " << upload_time << " ms (pinned memory + async)" << std::endl;
 }
 
 void GPUPreprocessor::convertToPointsWithNormals()

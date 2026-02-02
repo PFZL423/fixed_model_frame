@@ -134,6 +134,14 @@ public:
     void reserveMemory(size_t max_points);
     void clearMemory();
 
+    // Stream 管理接口
+    void setStream(cudaStream_t stream);
+    cudaStream_t getStream() const { return stream_; }
+
+    // 零拷贝接口：暴露输出缓冲区指针
+    GPUPoint3f* getOutputBuffer() const;
+    size_t getOutputCount() const;
+
     // 性能统计
     struct PerformanceStats
     {
@@ -174,6 +182,14 @@ public:
     void processVoxelCentroids(size_t input_count);
 
 private:
+    // CPU端锁页内存缓冲区（预分配，DMA直接访问）
+    GPUPoint3f* h_pinned_buffer_;
+    size_t max_points_capacity_;  ///< 最大容量（用于预分配）
+    
+    // CUDA流（用于异步操作和流隔离）
+    cudaStream_t stream_;
+    bool owns_stream_;  ///< 是否拥有stream的所有权
+
     // GPU内存缓冲区
     thrust::device_vector<GPUPoint3f> d_input_points_;
     thrust::device_vector<GPUPoint3f> d_temp_points_;
@@ -201,11 +217,11 @@ private:
     void preprocessOnGPU(const PreprocessConfig &config);
     ProcessingResult createResult(const PreprocessConfig &config);
 
-    // 独立转换函数
-    std::vector<GPUPoint3f> convertPCLToGPU(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cpu_cloud);
+    // 独立转换函数（返回转换的点数，数据直接写入 h_pinned_buffer_）
+    size_t convertPCLToGPU(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cpu_cloud);
 
-    // GPU上传函数（在.cu中实现）
-    void cuda_uploadGPUPoints(const std::vector<GPUPoint3f> &cpu_points);
+    // GPU上传函数（在.cu中实现，使用异步上传和 pinned memory）
+    void cuda_uploadGPUPoints(const GPUPoint3f* h_pinned_points, size_t count);
 
     // 获取GPU结果的引用（供后续模块使用）
     const thrust::device_vector<GPUPoint3f> &getOutputPoints() const { return d_output_points_; }

@@ -183,11 +183,31 @@ public:
     */
    size_t getPlaneInlierCount(size_t index) const;
 
-   /**
-    * @brief 获取剩余点云的数量
-    * @return 剩余点的数量
-    */
-   size_t getRemainingPointCount() const;
+    /**
+     * @brief 获取剩余点云的数量
+     * @return 剩余点的数量
+     */
+    size_t getRemainingPointCount() const;
+
+    /**
+     * @brief 设置CUDA流（用于异步操作和流隔离）
+     * @param stream CUDA流指针
+     */
+    void setStream(cudaStream_t stream);
+
+    /**
+     * @brief 获取当前CUDA流
+     * @return CUDA流指针
+     */
+    cudaStream_t getStream() const { return stream_; }
+
+    /**
+     * @brief 零拷贝接口：从外部GPU缓冲区直接进行平面检测
+     * 借用外部显存指针，避免数据拷贝开销
+     * @param d_external_points 外部GPU点云缓冲区指针
+     * @param count 点云数量
+     */
+    void findPlanesFromGPU(GPUPoint3f* d_external_points, size_t count);
 
 
 private:
@@ -204,6 +224,8 @@ private:
     size_t current_point_count_;        ///< 当前点云数量（替代d_all_points_.size()）
     GPUPoint3f* h_pinned_buffer_;       ///< CPU端锁页内存缓冲区（预分配，DMA直接访问，避免驱动层拷贝）
     cudaStream_t stream_;               ///< CUDA流，用于异步操作和流隔离
+    bool is_external_memory_;           ///< 标记是否使用外部显存（零拷贝模式）
+    GPUPoint3f* d_points_backup_;       ///< 备份原始 d_points_buffer_ 指针（用于零拷贝恢复）
 
     // ========================================
     // 核心数据成员
@@ -349,4 +371,11 @@ private:
      * @return 有效点数量
      */
     int countValidPoints() const;
+
+    /**
+     * @brief 调整辅助缓冲区大小（支持外部内存模式）
+     * 当使用外部显存时，跳过 d_points_buffer_ 的分配/释放
+     * @param point_count 点云数量
+     */
+    void resizeBuffers(size_t point_count);
 };

@@ -41,6 +41,8 @@ PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
     stream_ = nullptr;
     max_points_capacity_ = 2000000; // 200万点，足够处理大部分场景
     current_point_count_ = 0; // 初始化当前点数量为0
+    is_external_memory_ = false;  // 初始化为非外部内存模式
+    d_points_backup_ = nullptr;   // 初始化为空指针
     
     // 预分配GPU显存缓冲区
     cudaError_t err = cudaMalloc((void**)&d_points_buffer_, max_points_capacity_ * sizeof(GPUPoint3f));
@@ -112,8 +114,8 @@ PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
 }
 template <typename pointT>
 PlaneDetect<pointT>::~PlaneDetect(){
-    // 释放预分配的GPU显存缓冲区
-    if (d_points_buffer_ != nullptr)
+    // 释放预分配的GPU显存缓冲区（仅当不是外部内存时）
+    if (d_points_buffer_ != nullptr && !is_external_memory_)
     {
         cudaFree(d_points_buffer_);
         d_points_buffer_ = nullptr;
@@ -624,6 +626,62 @@ typename pcl::PointCloud<PointT>::Ptr PlaneDetect<PointT>::getFinalCloud() const
     final_cloud->is_dense = true;
     
     return final_cloud;
+}
+
+// ========== Stream 管理接口实现 ==========
+template <typename PointT>
+void PlaneDetect<PointT>::setStream(cudaStream_t stream)
+{
+    // 如果已有 stream 且拥有所有权，先销毁旧 stream
+    if (stream_ != nullptr)
+    {
+        // 注意：PlaneDetect 的 stream 在构造函数中创建，但这里不销毁
+        // 因为可能被外部管理，由析构函数统一处理
+    }
+    
+    stream_ = stream;
+}
+
+// ========== 零拷贝接口实现 ==========
+template <typename PointT>
+void PlaneDetect<PointT>::findPlanesFromGPU(GPUPoint3f* d_external_points, size_t count)
+{
+    if (d_external_points == nullptr || count == 0)
+    {
+        std::cerr << "[findPlanesFromGPU] 错误：输入参数无效" << std::endl;
+        return;
+    }
+
+    if (stream_ == nullptr)
+    {
+        std::cerr << "[findPlanesFromGPU] 错误：CUDA流未初始化" << std::endl;
+        return;
+    }
+
+    // Step 1: 状态保存
+    d_points_backup_ = d_points_buffer_;
+
+    // Step 2: 指针借用
+    d_points_buffer_ = d_external_points;
+    current_point_count_ = count;
+    is_external_memory_ = true;
+
+    // Step 3: 辅助空间适配（包括 remaining_indices 的 resize）
+    resizeBuffers(count);
+    
+    // 使用异步 memset 初始化掩码为全1（所有点初始有效）
+    if (d_valid_mask_ != nullptr)
+    {
+        cudaMemsetAsync(d_valid_mask_, 1, count * sizeof(uint8_t), stream_);
+    }
+
+    // Step 5: 核心计算
+    findPlanes_BatchGPU();
+
+    // Step 6: 现场恢复
+    d_points_buffer_ = d_points_backup_;
+    is_external_memory_ = false;
+    d_points_backup_ = nullptr;
 }
 
 // 显式模板实例化

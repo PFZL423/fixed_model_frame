@@ -861,6 +861,56 @@ int PlaneDetect<PointT>::countValidPoints() const
     return static_cast<int>(thrust::count(d_mask_ptr, d_mask_ptr + point_count, 1));
 }
 
+template <typename PointT>
+void PlaneDetect<PointT>::resizeBuffers(size_t point_count)
+{
+    // 如果使用外部内存，跳过 d_points_buffer_ 的分配/释放
+    if (is_external_memory_)
+    {
+        // 仅调整辅助缓冲区大小
+        // d_valid_mask_ 需要足够大
+        if (d_valid_mask_ == nullptr || point_count > max_points_capacity_)
+        {
+            // 如果掩码缓冲区不存在或容量不足，需要重新分配
+            if (d_valid_mask_ != nullptr)
+            {
+                cudaFree(d_valid_mask_);
+            }
+            
+            cudaError_t err = cudaMalloc((void**)&d_valid_mask_, point_count * sizeof(uint8_t));
+            if (err != cudaSuccess)
+            {
+                std::cerr << "[resizeBuffers] 错误：无法分配掩码缓冲区: " 
+                          << cudaGetErrorString(err) << std::endl;
+                d_valid_mask_ = nullptr;
+                return;
+            }
+            
+            // 更新最大容量
+            max_points_capacity_ = point_count;
+        }
+        
+        // 调整 d_remaining_indices_ 大小并初始化序列
+        d_remaining_indices_.resize(point_count);
+        thrust::sequence(d_remaining_indices_.begin(), d_remaining_indices_.end(), 0);
+    }
+    else
+    {
+        // 正常模式：处理所有缓冲区
+        // 这里可以调用现有的 initializeGPUMemory 逻辑（如果需要）
+        // 但当前实现中，缓冲区已在构造函数中预分配，这里只需要确保大小足够
+        if (point_count > max_points_capacity_)
+        {
+            std::cerr << "[resizeBuffers] 警告：点云数量 (" << point_count 
+                      << ") 超过预分配容量 (" << max_points_capacity_ << ")" << std::endl;
+        }
+        
+        // 调整 d_remaining_indices_ 大小并初始化序列
+        d_remaining_indices_.resize(point_count);
+        thrust::sequence(d_remaining_indices_.begin(), d_remaining_indices_.end(), 0);
+    }
+}
+
 // 显式模板实例化
 template class PlaneDetect<pcl::PointXYZ>;
 template class PlaneDetect<pcl::PointXYZI>;  // 主要使用格式

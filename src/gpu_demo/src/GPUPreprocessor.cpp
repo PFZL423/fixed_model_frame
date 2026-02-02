@@ -20,12 +20,60 @@ GPUPreprocessor::GPUPreprocessor()
         throw std::runtime_error("Failed to set CUDA device!");
     }
 
+    // 初始化成员变量
+    h_pinned_buffer_ = nullptr;
+    max_points_capacity_ = 2000000; // 200万点，足够处理大部分场景
+    stream_ = nullptr;
+    owns_stream_ = true;
+
+    // 预分配锁页内存（避免驱动层隐式拷贝，DMA直接访问）
+    cudaError_t err_pinned = cudaHostAlloc((void**)&h_pinned_buffer_, 
+                                            max_points_capacity_ * sizeof(GPUPoint3f),
+                                            cudaHostAllocDefault);
+    if (err_pinned != cudaSuccess)
+    {
+        std::cerr << "[GPUPreprocessor] 错误：无法分配锁页内存: " 
+                  << cudaGetErrorString(err_pinned) << std::endl;
+        h_pinned_buffer_ = nullptr;
+    }
+
+    // 创建默认CUDA流（用于异步操作和流隔离）
+    cudaError_t err_stream = cudaStreamCreate(&stream_);
+    if (err_stream != cudaSuccess)
+    {
+        std::cerr << "[GPUPreprocessor] 错误：无法创建CUDA流: " 
+                  << cudaGetErrorString(err_stream) << std::endl;
+        stream_ = nullptr;
+    }
+
     std::cout << "[GPUPreprocessor] Initialized with CUDA device 0" << std::endl;
+    if (h_pinned_buffer_ != nullptr && stream_ != nullptr)
+    {
+        std::cout << "[GPUPreprocessor] 预分配锁页内存: " 
+                  << max_points_capacity_ << " 点 (" 
+                  << (max_points_capacity_ * sizeof(GPUPoint3f) / 1024.0 / 1024.0) 
+                  << " MB)" << std::endl;
+        std::cout << "[GPUPreprocessor] CUDA流已创建" << std::endl;
+    }
 }
 
 GPUPreprocessor::~GPUPreprocessor()
 {
     clearMemory();
+
+    // 释放锁页内存
+    if (h_pinned_buffer_ != nullptr)
+    {
+        cudaFreeHost(h_pinned_buffer_);
+        h_pinned_buffer_ = nullptr;
+    }
+
+    // 销毁CUDA流（仅当拥有所有权时）
+    if (stream_ != nullptr && owns_stream_)
+    {
+        cudaStreamDestroy(stream_);
+        stream_ = nullptr;
+    }
 }
 
 // ========== 主要处理接口 ==========
@@ -37,11 +85,11 @@ ProcessingResult GPUPreprocessor::process(const pcl::PointCloud<pcl::PointXYZ>::
 
     // Step 1: 上传PCL点云到GPU
     auto upload_start = std::chrono::high_resolution_clock::now();
-    std::vector<GPUPoint3f> gpu_points = convertPCLToGPU(cpu_cloud); 
+    size_t point_count = convertPCLToGPU(cpu_cloud); 
     auto upload_end = std::chrono::high_resolution_clock::now();
     last_stats_.upload_time_ms = std::chrono::duration<float, std::milli>(upload_end - upload_start).count();
     std::cout<<last_stats_.upload_time_ms<<"!!!!!!!!!!!!!"<<std::endl;
-    cuda_uploadGPUPoints(gpu_points);
+    cuda_uploadGPUPoints(h_pinned_buffer_, point_count);
     auto upload_end2 = std::chrono::high_resolution_clock::now();
     last_stats_.upload_time_ms = std::chrono::duration<float, std::milli>(upload_end2 - upload_end).count();
 
@@ -195,28 +243,65 @@ std::vector<GPUPointNormal3f> ProcessingResult::downloadPointsWithNormals() cons
     // }
 
     // return result;
+    return {};  // 临时返回空向量，功能已禁用
 }
 
-std::vector<GPUPoint3f> GPUPreprocessor::convertPCLToGPU(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cpu_cloud)
+size_t GPUPreprocessor::convertPCLToGPU(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cpu_cloud)
 {
-    std::vector<GPUPoint3f> h_points;
-    h_points.reserve(cpu_cloud->size());
-
-    for (const auto &pt : cpu_cloud->points)
+    if (h_pinned_buffer_ == nullptr)
     {
+        std::cerr << "[convertPCLToGPU] 错误：锁页内存未初始化" << std::endl;
+        return 0;
+    }
+
+    size_t valid_count = 0;
+    size_t max_count = std::min(cpu_cloud->size(), max_points_capacity_);
+
+    for (size_t i = 0; i < cpu_cloud->size() && valid_count < max_count; ++i)
+    {
+        const auto &pt = cpu_cloud->points[i];
         // ✅ 添加有效性检查
         if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
         {
-            GPUPoint3f gpu_pt;
-            gpu_pt.x = pt.x;
-            gpu_pt.y = pt.y;
-            gpu_pt.z = pt.z;
-            h_points.push_back(gpu_pt);
+            h_pinned_buffer_[valid_count].x = pt.x;
+            h_pinned_buffer_[valid_count].y = pt.y;
+            h_pinned_buffer_[valid_count].z = pt.z;
+            h_pinned_buffer_[valid_count].intensity = 0.0f;
+            valid_count++;
         }
     }
 
-    std::cout << "[GPUPreprocessor] Converted " << h_points.size() << " valid points (filtered "
-              << (cpu_cloud->size() - h_points.size()) << " invalid points)" << std::endl;
+    std::cout << "[GPUPreprocessor] Converted " << valid_count << " valid points (filtered "
+              << (cpu_cloud->size() - valid_count) << " invalid points)" << std::endl;
 
-    return h_points; // ✅ 返回转换结果，不执行上传
+    return valid_count; // ✅ 返回转换的点数，数据已写入 h_pinned_buffer_
+}
+
+// ========== Stream 管理接口实现 ==========
+void GPUPreprocessor::setStream(cudaStream_t stream)
+{
+    // 如果已有 stream 且拥有所有权，先销毁旧 stream
+    if (stream_ != nullptr && owns_stream_)
+    {
+        cudaStreamDestroy(stream_);
+    }
+    
+    stream_ = stream;
+    owns_stream_ = false;  // 外部管理
+}
+
+// ========== 零拷贝接口实现 ==========
+GPUPoint3f* GPUPreprocessor::getOutputBuffer() const
+{
+    if (d_output_points_.empty())
+    {
+        return nullptr;
+    }
+    // 使用 const_cast 因为外部可能需要修改（虽然这里是 const 方法，但返回的指针允许修改）
+    return const_cast<GPUPoint3f*>(thrust::raw_pointer_cast(d_output_points_.data()));
+}
+
+size_t GPUPreprocessor::getOutputCount() const
+{
+    return d_output_points_.size();
 }
