@@ -8,6 +8,13 @@
 // ========================================
 
 /**
+ * @brief 初始化序列内核（用于替代不支持流绑定的 thrust::sequence）
+ * @param indices [out] 索引数组
+ * @param n 数组大小
+ */
+__global__ void initSequenceKernel(int *indices, int n);
+
+/**
  * @brief 初始化GPU随机数生成器状态
  * 为每个GPU线程分配独立的curand状态，确保并行采样的随机性
  * @param states [out] 随机数状态数组

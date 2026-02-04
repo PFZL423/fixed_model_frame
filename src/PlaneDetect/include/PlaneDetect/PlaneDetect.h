@@ -216,6 +216,14 @@ public:
      */
     void releaseExternalBuffer();
 
+    /**
+     * @brief 获取压实后的剩余点云GPU指针（零拷贝接口）
+     * 将 d_points_buffer_ 中 d_valid_mask_ == 1 的点压实到连续内存
+     * @param out_count [out] 输出剩余点数量
+     * @return GPU指针，指向压实后的剩余点云数据
+     */
+    GPUPoint3f* getRemainingPointsGPU(size_t &out_count);
+
 private:
     // 添加临时存储成员变量
     mutable thrust::device_vector<int> d_temp_inlier_indices_;
@@ -232,6 +240,7 @@ private:
     cudaStream_t stream_;               ///< CUDA流，用于异步操作和流隔离
     bool is_external_memory_;           ///< 标记是否使用外部显存（零拷贝模式）
     GPUPoint3f* d_points_backup_;       ///< 备份原始 d_points_buffer_ 指针（用于零拷贝恢复）
+    GPUPoint3f* d_remaining_points_compacted_; ///< 压实后的剩余点云缓冲区（用于零拷贝接力）
 
     // ========================================
     // 核心数据成员

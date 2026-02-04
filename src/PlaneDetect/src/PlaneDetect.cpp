@@ -43,6 +43,7 @@ PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
     current_point_count_ = 0; // 初始化当前点数量为0
     is_external_memory_ = false;  // 初始化为非外部内存模式
     d_points_backup_ = nullptr;   // 初始化为空指针
+    d_remaining_points_compacted_ = nullptr; // 初始化压实缓冲区为空
     
     // 预分配GPU显存缓冲区
     cudaError_t err = cudaMalloc((void**)&d_points_buffer_, max_points_capacity_ * sizeof(GPUPoint3f));
@@ -77,6 +78,23 @@ PlaneDetect<pointT>::PlaneDetect(const DetectorParams &params) : params_(params)
         std::cout << "[PlaneDetect] 预分配掩码缓冲区: " 
                   << max_points_capacity_ << " 点 (" 
                   << (max_points_capacity_ * sizeof(uint8_t) / 1024.0 / 1024.0) 
+                  << " MB)" << std::endl;
+    }
+    
+    // 预分配压实缓冲区（用于零拷贝接力）
+    err = cudaMalloc((void**)&d_remaining_points_compacted_, max_points_capacity_ * sizeof(GPUPoint3f));
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[PlaneDetect] 错误：无法预分配压实缓冲区: " 
+                  << cudaGetErrorString(err) << std::endl;
+        d_remaining_points_compacted_ = nullptr;
+        // 不释放其他缓冲区，因为压实缓冲区是可选的
+    }
+    else if (params_.verbosity > 0)
+    {
+        std::cout << "[PlaneDetect] 预分配压实缓冲区: " 
+                  << max_points_capacity_ << " 点 (" 
+                  << (max_points_capacity_ * sizeof(GPUPoint3f) / 1024.0 / 1024.0) 
                   << " MB)" << std::endl;
     }
     
@@ -126,6 +144,13 @@ PlaneDetect<pointT>::~PlaneDetect(){
     {
         cudaFree(d_valid_mask_);
         d_valid_mask_ = nullptr;
+    }
+    
+    // 释放预分配的压实缓冲区
+    if (d_remaining_points_compacted_ != nullptr)
+    {
+        cudaFree(d_remaining_points_compacted_);
+        d_remaining_points_compacted_ = nullptr;
     }
     
     // 释放锁页内存

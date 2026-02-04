@@ -12,18 +12,21 @@
 #include <algorithm>
 #include <numeric>
 #include <Eigen/Dense>
+#include <omp.h>
+#include <limits>
 
 #include "PlaneDetect/PlaneDetect.h"
 #include "super_voxel/supervoxel.h"
 #include "gpu_demo/GPUPreprocessor.h"
+#include "gpu_demo/QuadricDetect.h"
 #include <cuda_runtime.h>
-#include <map>  // 用于帧同步
+#include <memory>
 
 class PlaneSupervoxelNode
 {
 public:
     PlaneSupervoxelNode(ros::NodeHandle &nh, ros::NodeHandle &pnh)
-        : nh_(nh), pnh_(pnh), plane_detector_(nullptr), current_frame_seq_(0), shared_stream_(nullptr)
+        : nh_(nh), pnh_(pnh), plane_detector_(nullptr), unified_stream_(nullptr)
     {
         // 读取参数
         loadParameters();
@@ -31,8 +34,11 @@ public:
         // 初始化平面检测器
         initializePlaneDetector();
 
-        // 初始化 GPU 预处理器和共享 CUDA 流
+        // 初始化 GPU 预处理器和统一 CUDA 流
         initializeGPUPreprocessor();
+
+        // 初始化二次曲面检测器
+        initializeQuadricDetector();
 
         // 初始化超体素处理器
         initializeSupervoxelProcessor();
@@ -40,16 +46,16 @@ public:
         // 设置订阅和发布
         setupPubSub();
 
-        ROS_INFO("PlaneSupervoxelNode (Node 1) initialized successfully");
+        ROS_INFO("Unified Detection Node initialized successfully");
     }
 
     ~PlaneSupervoxelNode()
     {
         // 销毁 CUDA 流
-        if (shared_stream_ != nullptr)
+        if (unified_stream_ != nullptr)
         {
-            cudaStreamDestroy(shared_stream_);
-            shared_stream_ = nullptr;
+            cudaStreamDestroy(unified_stream_);
+            unified_stream_ = nullptr;
         }
     }
 
@@ -58,10 +64,8 @@ private:
     
     // 订阅者
     ros::Subscriber camera_sub_;           // 订阅原始点云 /camera/rgb/points
-    ros::Subscriber quadric_result_sub_;   // 订阅二次曲面处理后的点云 /node2_output
     
     // 发布者
-    ros::Publisher plane_remaining_pub_;   // 发布平面检测后的剩余点云给节点2
     ros::Publisher plane_marker_pub_;      // 平面可视化
     ros::Publisher convex_hull_marker_pub_;  // 凸包可视化
     ros::Publisher result_cloud_pub_;      // 最终结果点云
@@ -71,19 +75,16 @@ private:
 
     // GPU 预处理器和流
     std::shared_ptr<GPUPreprocessor> gpu_preprocessor_;
-    cudaStream_t shared_stream_;
+    cudaStream_t unified_stream_;
+
+    // 二次曲面检测器
+    std::shared_ptr<QuadricDetect> quadric_detector_;
+    quadric::DetectorParams quadric_params_;
 
     // 超体素处理器
     std::unique_ptr<super_voxel::SupervoxelProcessor> sv_processor_;
     super_voxel::SupervoxelParams sv_params_;
 
-    // 帧同步：存储待处理的点云（等待二次曲面节点处理完成）
-    std::map<uint32_t, std_msgs::Header> pending_frames_;
-
-    // 整体计时：存储每帧的开始时间
-    std::map<uint32_t, std::chrono::high_resolution_clock::time_point> frame_start_times_;
-    
-    uint32_t current_frame_seq_;
 
     // 参数
     bool enable_voxel_filter_;
@@ -162,6 +163,14 @@ private:
     pnh_.param("enable_plane_visualization", enable_plane_visualization_, enable_plane_visualization_);
     pnh_.param("enable_convex_hull_visualization", enable_convex_hull_visualization_, enable_convex_hull_visualization_);
 
+        // 二次曲面检测参数
+        pnh_.param("quadric_min_remaining_points_percentage", quadric_params_.min_remaining_points_percentage, 0.03);
+        pnh_.param("quadric_distance_threshold", quadric_params_.quadric_distance_threshold, 0.02);
+        pnh_.param("min_quadric_inlier_count_absolute", quadric_params_.min_quadric_inlier_count_absolute, 500);
+        pnh_.param("quadric_max_iterations", quadric_params_.quadric_max_iterations, 5000);
+        pnh_.param("min_quadric_inlier_percentage", quadric_params_.min_quadric_inlier_percentage, 0.05);
+        pnh_.param("quadric_verbosity", quadric_params_.verbosity, 1);
+
         // 超体素算法参数
         pnh_.param("sv_voxel_resolution", sv_params_.voxel_resolution, 0.05);
         pnh_.param("sv_seed_resolution", sv_params_.seed_resolution, 0.2);
@@ -214,19 +223,31 @@ private:
         // 初始化 GPU 预处理器
         gpu_preprocessor_ = std::make_shared<GPUPreprocessor>();
 
-        // 创建共享 CUDA 流
-        cudaError_t err = cudaStreamCreate(&shared_stream_);
+        // 创建统一 CUDA 流
+        cudaError_t err = cudaStreamCreate(&unified_stream_);
         if (err != cudaSuccess)
         {
             ROS_ERROR("Failed to create CUDA stream: %s", cudaGetErrorString(err));
             throw std::runtime_error("CUDA stream creation failed");
         }
 
-        // 配置共享流（关键：确保串行无锁流水线）
-        gpu_preprocessor_->setStream(shared_stream_);
-        plane_detector_->setStream(shared_stream_);
+        // 配置统一流（关键：确保串行无锁流水线）
+        gpu_preprocessor_->setStream(unified_stream_);
+        plane_detector_->setStream(unified_stream_);
 
-        ROS_INFO("GPUPreprocessor initialized with shared CUDA stream");
+        ROS_INFO("GPUPreprocessor initialized with unified CUDA stream");
+    }
+
+    void initializeQuadricDetector()
+    {
+        // 初始化二次曲面检测器
+        quadric_detector_ = std::make_shared<QuadricDetect>(quadric_params_);
+        
+        // 绑定统一流
+        quadric_detector_->setStream(unified_stream_);
+
+        ROS_INFO("QuadricDetector initialized with threshold=%.3f", 
+                 quadric_params_.quadric_distance_threshold);
     }
 
     void initializeSupervoxelProcessor()
@@ -243,12 +264,6 @@ private:
         //  订阅原始点云（队列=1，最小延迟）
         camera_sub_ = nh_.subscribe(input_topic_, 1, &PlaneSupervoxelNode::cameraCallback, this);
         
-        //  订阅二次曲面节点的输出（队列=1，最小延迟）
-        quadric_result_sub_ = nh_.subscribe("/node2_output", 1, &PlaneSupervoxelNode::quadricResultCallback, this);
-        
-        //  发布平面检测后的剩余点云给节点2（不使用 latched，实时发布）
-        plane_remaining_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/plane_remaining", 1, false);
-        
         // 发布平面可视化
         plane_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("plane_markers", 1, true);
         
@@ -258,10 +273,8 @@ private:
         // 发布最终结果点云
         result_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("remaining_cloud", 1, true);
 
-        ROS_INFO("=== Node 1: PlaneSupervoxelNode ===");
+        ROS_INFO("=== Unified Detection Node: Plane + Quadric ===");
         ROS_INFO("Subscribed to camera: %s", input_topic_.c_str());
-        ROS_INFO("Subscribed to quadric result: /node2_output");
-        ROS_INFO("Publishing plane remaining to: /plane_remaining");
         ROS_INFO("Publishing plane markers to: plane_markers");
         ROS_INFO("Publishing final result to: remaining_cloud");
     }
@@ -269,8 +282,8 @@ private:
     // 回调1：处理相机原始点云，进行平面检测
     void cameraCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
     {
-        //  开始整体计时
-        auto frame_start_time = std::chrono::high_resolution_clock::now();
+        // 全链路总计时开始
+        auto total_start = std::chrono::high_resolution_clock::now();
         
         ROS_INFO("Received point cloud with %d points", msg->width * msg->height);
 
@@ -286,15 +299,37 @@ private:
 
         // ========== Step 1: GPU 预处理（体素下采样 + 离群点移除）==========
         // 转换为 PointXYZ（GPUPreprocessor 当前只支持 PointXYZ）
+        // 使用 OpenMP 并行化点云转换，提升性能
         pcl::PointCloud<pcl::PointXYZ>::Ptr input_xyz(new pcl::PointCloud<pcl::PointXYZ>);
-        input_xyz->reserve(input_cloud->size());
-        for (const auto &pt : input_cloud->points)
+        input_xyz->points.resize(input_cloud->size());
+        input_xyz->width = input_cloud->size();
+        input_xyz->height = 1;
+        input_xyz->is_dense = false;  // 可能包含无效点，稍后过滤
+        
+        #pragma omp parallel for
+        for (size_t i = 0; i < input_cloud->size(); ++i)
         {
+            const auto &pt = input_cloud->points[i];
             if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
             {
-                input_xyz->push_back(pcl::PointXYZ(pt.x, pt.y, pt.z));
+                input_xyz->points[i] = pcl::PointXYZ(pt.x, pt.y, pt.z);
+            }
+            else
+            {
+                // 标记为无效点（使用 NaN）
+                input_xyz->points[i].x = std::numeric_limits<float>::quiet_NaN();
+                input_xyz->points[i].y = std::numeric_limits<float>::quiet_NaN();
+                input_xyz->points[i].z = std::numeric_limits<float>::quiet_NaN();
             }
         }
+        
+        // 过滤无效点
+        input_xyz->points.erase(
+            std::remove_if(input_xyz->points.begin(), input_xyz->points.end(),
+                           [](const pcl::PointXYZ& pt) {
+                               return !std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z);
+                           }),
+            input_xyz->points.end());
         input_xyz->width = input_xyz->size();
         input_xyz->height = 1;
         input_xyz->is_dense = true;
@@ -343,19 +378,50 @@ private:
 
         ROS_INFO("Plane detection (zero-copy): %.2f ms", plane_detect_time);
 
-        // 确保 GPU 操作完成（仅在必要时同步）
-        cudaError_t err = cudaStreamSynchronize(shared_stream_);
-        if (err != cudaSuccess)
+        // ========== Step 3: GPU 压实接力 ==========
+        size_t rem_count = 0;
+        GPUPoint3f* d_rem_ptr = plane_detector_->getRemainingPointsGPU(rem_count);
+        
+        if (d_rem_ptr == nullptr || rem_count == 0)
         {
-            ROS_ERROR("CUDA stream synchronization failed: %s", cudaGetErrorString(err));
+            ROS_WARN("No remaining points after plane detection");
+            // 安全同步与释放
+            cudaStreamSynchronize(unified_stream_);
+            plane_detector_->releaseExternalBuffer();
             return;
         }
 
-        // 获取检测结果
-        const auto &detected_planes = plane_detector_->getDetectedPrimitives();
+        ROS_INFO("GPU compaction: %zu remaining points ready for quadric detection", rem_count);
 
+        // ========== Step 4: 二次曲面检测（零拷贝）==========
+        auto quadric_detect_start = std::chrono::high_resolution_clock::now();
+        bool quadric_success = quadric_detector_->processCloudDirect(d_rem_ptr, rem_count);
+        auto quadric_detect_end = std::chrono::high_resolution_clock::now();
+        float quadric_detect_time = std::chrono::duration<float, std::milli>(
+            quadric_detect_end - quadric_detect_start).count();
+
+        ROS_INFO("Quadric detection (zero-copy): %.2f ms", quadric_detect_time);
+
+        // ========== Step 5: 安全同步与释放 ==========
+        cudaError_t err = cudaStreamSynchronize(unified_stream_);
+        if (err != cudaSuccess)
+        {
+            ROS_ERROR("CUDA stream synchronization failed: %s", cudaGetErrorString(err));
+            plane_detector_->releaseExternalBuffer();
+            return;
+        }
+
+        // 全链路总计时结束
+        auto total_end = std::chrono::high_resolution_clock::now();
+        float total_ms = std::chrono::duration<float, std::milli>(total_end - total_start).count();
+
+        // 释放外部显存缓冲区
+        plane_detector_->releaseExternalBuffer();
+
+        // ========== Step 6: 结果合并与可视化 ==========
+        // 获取平面检测结果
+        const auto &detected_planes = plane_detector_->getDetectedPrimitives();
         ROS_INFO("=== PLANE DETECTION RESULTS ===");
-        // ROS_INFO("Total processing time: %ld ms", duration.count());
         ROS_INFO("Number of planes detected: %zu", detected_planes.size());
 
         // 输出每个平面的参数
@@ -367,13 +433,20 @@ private:
                      plane.model_coefficients[0], plane.model_coefficients[1],
                      plane.model_coefficients[2], plane.model_coefficients[3]);
             ROS_INFO("  Inliers: %zu points", plane.inliers->size());
+        }
 
-            // 计算法向量模长验证
-            float nx = plane.model_coefficients[0];
-            float ny = plane.model_coefficients[1];
-            float nz = plane.model_coefficients[2];
-            float norm = sqrt(nx * nx + ny * ny + nz * nz);
-            ROS_INFO("  Normal vector norm: %.6f (should be ~1.0)", norm);
+        // 获取二次曲面检测结果
+        if (quadric_success)
+        {
+            const auto &detected_quadrics = quadric_detector_->getDetectedPrimitives();
+            ROS_INFO("=== QUADRIC DETECTION RESULTS ===");
+            ROS_INFO("Number of quadrics detected: %zu", detected_quadrics.size());
+
+            for (size_t i = 0; i < detected_quadrics.size(); ++i)
+            {
+                const auto &quadric = detected_quadrics[i];
+                ROS_INFO("Quadric %zu: %zu inliers", i + 1, quadric.inliers->size());
+            }
         }
 
         // 可视化平面（受开关控制）
@@ -382,87 +455,24 @@ private:
             visualizePlanes(detected_planes, msg->header);
         }
 
-        // 获取平面检测后的剩余点云
-        auto remaining_cloud = plane_detector_->getFinalCloud();
-        ROS_INFO("Points remaining after plane detection: %zu", remaining_cloud->size());
+        // 获取最终剩余点云（二次曲面检测后）
+        auto final_remaining_cloud = quadric_detector_->getFinalCloud();
+        ROS_INFO("Points remaining after quadric detection: %zu", final_remaining_cloud->size());
 
-        // 发布剩余点云给节点2（二次曲面检测节点）
-        sensor_msgs::PointCloud2 plane_remaining_msg;
-        pcl::toROSMsg(*remaining_cloud, plane_remaining_msg);
-        
-        //  关键修复：完整保留原始 header（包括 stamp 时间戳）
-        plane_remaining_msg.header.stamp = msg->header.stamp;      // 保留原始时间戳
-        plane_remaining_msg.header.frame_id = output_frame_;       // 使用输出坐标系
-        plane_remaining_msg.header.seq = current_frame_seq_++;     // 使用自增序列号用于帧同步
-        
-        // 保存帧信息，等待节点2返回
-        pending_frames_[plane_remaining_msg.header.seq] = msg->header;
-        // 记录该帧的起始时间用于整体计时（Plane -> Quadric(Node2) -> Supervoxel）
-        frame_start_times_[plane_remaining_msg.header.seq] = frame_start_time;
-        
-        plane_remaining_pub_.publish(plane_remaining_msg);
-        ROS_INFO("📤 [Node1] Published plane remaining cloud (%zu points) to /plane_remaining (frame %u)", 
-                 remaining_cloud->size(), plane_remaining_msg.header.seq);
-
-        // 关键修复：在 getFinalCloud() 完成并发布消息之后，显式释放外部显存缓冲区
-        // 这确保 d_points_buffer_ 恢复指向内部预分配缓冲区，避免指针过早释放导致的 Bug
-        plane_detector_->releaseExternalBuffer();
-    }
-
-    // 回调2：接收节点2处理后的点云，进行超体素处理
-    void quadricResultCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
-    {
-        ROS_INFO("📥 [Node1] Received quadric result: %d points (frame %u)", 
-                 msg->width * msg->height, msg->header.seq);
-        
-        // 检查帧是否匹配
-        auto it = pending_frames_.find(msg->header.seq);
-        if (it == pending_frames_.end())
+        // 发布最终结果点云
+        if (!final_remaining_cloud->empty())
         {
-            ROS_WARN(" [Node1] Received quadric result for unknown frame %u, skipping", msg->header.seq);
-            return;
-        }
-        
-        // 转换点云
-        pcl::PointCloud<pcl::PointXYZI>::Ptr quadric_remaining(new pcl::PointCloud<pcl::PointXYZI>);
-        pcl::fromROSMsg(*msg, *quadric_remaining);
-        
-        ROS_INFO("Points remaining after quadric detection: %zu", quadric_remaining->size());
-
-        // 发布最终剩余点云
-        publishRemainingCloud(msg->header, quadric_remaining);
-
-        // 超体素处理
-        if (enable_supervoxel_ && quadric_remaining->size() >= min_remaining_points_for_supervoxel_)
-        {
-            processSupervoxels(msg->header, quadric_remaining);
-        }
-        else if (enable_supervoxel_)
-        {
-            ROS_INFO("Skipping supervoxel processing: insufficient points (%zu < %d)",
-                     quadric_remaining->size(), min_remaining_points_for_supervoxel_);
+            sensor_msgs::PointCloud2 result_msg;
+            pcl::toROSMsg(*final_remaining_cloud, result_msg);
+            result_msg.header = msg->header;
+            result_msg.header.frame_id = output_frame_;
+            result_cloud_pub_.publish(result_msg);
         }
 
-        // ========== 结束整体计时 ==========
-        auto frame_end_time = std::chrono::high_resolution_clock::now();
-        auto it_time = frame_start_times_.find(msg->header.seq);
-        if (it_time != frame_start_times_.end())
-        {
-            auto frame_duration = std::chrono::duration_cast<std::chrono::milliseconds>(frame_end_time - it_time->second);
-            ROS_INFO("========================================");
-            ROS_INFO("TOTAL FRAME PROCESSING TIME: %ld ms", frame_duration.count());
-            ROS_INFO("========================================");
-            // 移除时间记录
-            frame_start_times_.erase(it_time);
-        }
-        else
-        {
-            ROS_WARN("[Node1] Missing start time for frame %u when computing total time", msg->header.seq);
-        }
-
-        // 清理已处理的帧
-        pending_frames_.erase(it);
-        ROS_INFO(" [Node1] Frame %u processing complete", msg->header.seq);
+        // ========== 全链路总耗时统计 ==========
+        ROS_INFO("----------------------------------------");
+        ROS_INFO("  [ALL-IN-ONE] TOTAL LATENCY: %.2f ms", total_ms);
+        ROS_INFO("----------------------------------------");
     }
 
     void visualizePlanes(const std::vector<DetectedPrimitive<pcl::PointXYZI>> &planes,
@@ -1110,12 +1120,12 @@ int main(int argc, char **argv)
     try
     {
         PlaneSupervoxelNode node(nh, pnh);
-        ROS_INFO(" [Node1] PlaneSupervoxelNode started, waiting for point clouds...");
+        ROS_INFO("Unified Detection Node started, waiting for point clouds...");
         ros::spin();
     }
     catch (const std::exception &e)
     {
-        ROS_FATAL("[Node1] PlaneSupervoxelNode failed: %s", e.what());
+        ROS_FATAL("Unified Detection Node failed: %s", e.what());
         return -1;
     }
 

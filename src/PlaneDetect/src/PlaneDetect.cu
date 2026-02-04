@@ -847,6 +847,43 @@ int PlaneDetect<PointT>::downloadCompactPoints(GPUPoint3f* h_out_buffer) const
 }
 
 template <typename PointT>
+GPUPoint3f* PlaneDetect<PointT>::getRemainingPointsGPU(size_t &out_count)
+{
+    if (d_points_buffer_ == nullptr || d_valid_mask_ == nullptr || 
+        d_remaining_points_compacted_ == nullptr || stream_ == nullptr || 
+        current_point_count_ == 0)
+    {
+        out_count = 0;
+        return nullptr;
+    }
+
+    // 使用 thrust::copy_if 将有效点（d_valid_mask_ == 1）压实到连续内存
+    // 关键：必须使用 thrust::cuda::par.on(stream_) 绑定流，确保顺序执行
+    thrust::device_ptr<GPUPoint3f> d_points_ptr = thrust::device_pointer_cast(d_points_buffer_);
+    thrust::device_ptr<uint8_t> d_mask_ptr = thrust::device_pointer_cast(d_valid_mask_);
+    thrust::device_ptr<GPUPoint3f> d_compacted_ptr = thrust::device_pointer_cast(d_remaining_points_compacted_);
+
+    // 使用流绑定的 Thrust 操作
+    auto end_it = thrust::copy_if(
+        thrust::cuda::par.on(stream_),
+        d_points_ptr,
+        d_points_ptr + current_point_count_,
+        d_mask_ptr,
+        d_compacted_ptr,
+        IsValidPoint());
+
+    // 计算实际剩余点数量
+    out_count = thrust::distance(d_compacted_ptr, end_it);
+
+    if (params_.verbosity > 1)
+    {
+        std::cout << "[getRemainingPointsGPU] 压实完成，剩余点数: " << out_count << std::endl;
+    }
+
+    return d_remaining_points_compacted_;
+}
+
+template <typename PointT>
 int PlaneDetect<PointT>::countValidPoints() const
 {
     if (d_valid_mask_ == nullptr || current_point_count_ == 0)

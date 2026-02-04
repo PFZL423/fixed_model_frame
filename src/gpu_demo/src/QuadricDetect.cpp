@@ -2,6 +2,7 @@
 #include "gpu_demo/QuadricDetect_kernels.cuh"
 #include <pcl/common/io.h>
 #include <thrust/copy.h>
+#include <thrust/device_ptr.h>
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -14,11 +15,22 @@ using GPUtimer=quadric::GPUTimer;
 QuadricDetect::QuadricDetect(const DetectorParams &params) : params_(params)
 {
     cudaStreamCreate(&stream_);
+    owns_stream_ = true;
+    is_external_memory_ = false;
+    d_external_points_ = nullptr;
+    cusolver_handle_ = nullptr;
 }
 
 QuadricDetect::~QuadricDetect()
 {
-    cudaStreamDestroy(stream_);
+    if (owns_stream_ && stream_ != nullptr)
+    {
+        cudaStreamDestroy(stream_);
+    }
+    if (cusolver_handle_ != nullptr)
+    {
+        cusolverDnDestroy(cusolver_handle_);
+    }
 }
 
 bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr &input_cloud)
@@ -135,13 +147,15 @@ void QuadricDetect::findQuadrics_BatchGPU()
     float init_time = std::chrono::duration<float, std::milli>(init_end - init_start).count();
 
     size_t remaining_points = d_remaining_indices_.size();
-    size_t min_points = static_cast<size_t>(params_.min_remaining_points_percentage * d_all_points_.size());
+    // 获取点云总数（支持外部内存）
+    size_t total_points = is_external_memory_ ? d_remaining_indices_.size() : d_all_points_.size();
+    size_t min_points = static_cast<size_t>(params_.min_remaining_points_percentage * total_points);
 
     int iteration = 0;
 
     if (params_.verbosity > 0)
     {
-        std::cout << "[QuadricDetect] 开始检测，总点数: " << d_all_points_.size()
+        std::cout << "[QuadricDetect] 开始检测，总点数: " << total_points
                   << ", 最小剩余点数: " << min_points << std::endl;
         std::cout << "[QuadricDetect] 初始化GPU内存: " << init_time << " ms" << std::endl;
     }
@@ -182,9 +196,85 @@ void QuadricDetect::findQuadrics_BatchGPU()
         float inlier_count_time = std::chrono::duration<float, std::milli>(inlier_count_end - inlier_count_start).count();
         total_inlier_count_time += inlier_count_time;
 
+        // 调试信息：计算并打印前几个模型的距离统计
+        if (params_.verbosity > 1)
+        {
+            const int debug_model_count = std::min(3, batch_size);
+            std::cout << "[QuadricDetect] 计算前 " << debug_model_count << " 个模型的距离统计..." << std::endl;
+            
+            // 获取前几个模型
+            thrust::host_vector<GPUQuadricModel> h_models(debug_model_count);
+            thrust::copy_n(d_batch_models_.begin(), debug_model_count, h_models.begin());
+            
+            // 获取一些采样点来计算距离
+            const int sample_point_count = std::min(100, static_cast<int>(d_remaining_indices_.size()));
+            thrust::host_vector<GPUPoint3f> h_sample_points(sample_point_count);
+            GPUPoint3f* points_ptr = getPointsPtr();
+            cudaMemcpy(h_sample_points.data(),
+                       &points_ptr[0],
+                       sample_point_count * sizeof(GPUPoint3f),
+                       cudaMemcpyDeviceToHost);
+            
+            for (int model_id = 0; model_id < debug_model_count; ++model_id)
+            {
+                float min_dist = 1e10f;
+                float max_dist = 0.0f;
+                float sum_dist = 0.0f;
+                int valid_count = 0;
+                
+                for (int i = 0; i < sample_point_count; ++i)
+                {
+                    const GPUPoint3f& pt = h_sample_points[i];
+                    float x = pt.x, y = pt.y, z = pt.z;
+                    
+                    // 计算距离（简化版本，使用 evaluateQuadricDistance 的逻辑）
+                    float result = 0.0f;
+                    float coords[4] = {x, y, z, 1.0f};
+                    for (int row = 0; row < 4; ++row)
+                    {
+                        for (int col = 0; col < 4; ++col)
+                        {
+                            int idx = row * 4 + col;
+                            if (idx >= 0 && idx < 16)
+                            {
+                                float coeff = h_models[model_id].coeffs[idx];
+                                float term = coords[row] * coeff * coords[col];
+                                if (std::isfinite(term) && !std::isnan(term) && !std::isinf(term))
+                                {
+                                    result += term;
+                                }
+                            }
+                        }
+                    }
+                    
+                    float dist = std::abs(result);
+                    if (std::isfinite(dist) && !std::isnan(dist) && !std::isinf(dist))
+                    {
+                        min_dist = std::min(min_dist, dist);
+                        max_dist = std::max(max_dist, dist);
+                        sum_dist += dist;
+                        valid_count++;
+                    }
+                }
+                
+                if (valid_count > 0)
+                {
+                    float avg_dist = sum_dist / valid_count;
+                    std::cout << "  模型 " << model_id << " 距离统计 (基于 " << valid_count << " 个采样点):" << std::endl;
+                    std::cout << "    最小距离: " << min_dist << " m" << std::endl;
+                    std::cout << "    最大距离: " << max_dist << " m" << std::endl;
+                    std::cout << "    平均距离: " << avg_dist << " m" << std::endl;
+                    std::cout << "    阈值: " << params_.quadric_distance_threshold << " m" << std::endl;
+                    std::cout << "    内点计数: " << (thrust::host_vector<int>(d_batch_inlier_counts_)[model_id]) << std::endl;
+                }
+            }
+        }
+
         // Step 5: 找最优模型
         auto best_model_start = std::chrono::high_resolution_clock::now();
         launchFindBestModel(batch_size);
+        // 关键同步点：确保 GPU 完成最优模型查找后，CPU 才能读取结果
+        cudaStreamSynchronize(stream_);
         auto best_model_end = std::chrono::high_resolution_clock::now();
         float best_model_time = std::chrono::duration<float, std::milli>(best_model_end - best_model_start).count();
         total_best_model_time += best_model_time;
@@ -196,6 +286,32 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
         int best_count = h_best_count[0];
         int best_model_idx = h_best_index[0];
+        
+        // 调试信息：验证最优模型结果
+        if (params_.verbosity > 1)
+        {
+            std::cout << "[QuadricDetect] 最优模型选择结果:" << std::endl;
+            std::cout << "  最优模型索引: " << best_model_idx << std::endl;
+            std::cout << "  最优模型内点数: " << best_count << std::endl;
+            
+            // 验证索引有效性
+            if (best_model_idx < 0 || best_model_idx >= batch_size)
+            {
+                std::cerr << "[QuadricDetect] 警告：最优模型索引无效！" << std::endl;
+            }
+            
+            // 验证内点计数是否与直接读取的值一致
+            if (best_model_idx >= 0 && best_model_idx < batch_size)
+            {
+                thrust::host_vector<int> h_all_counts = d_batch_inlier_counts_;
+                int direct_count = h_all_counts[best_model_idx];
+                std::cout << "  直接读取的内点数（验证）: " << direct_count << std::endl;
+                if (best_count != direct_count)
+                {
+                    std::cerr << "[QuadricDetect] 警告：最优模型内点数不一致！" << std::endl;
+                }
+            }
+        }
 
         // 如果剩余点数已经很少，且内点数不足，立即停止
         if (remaining_points < min_points * 2 && best_count < params_.min_quadric_inlier_count_absolute) {
@@ -393,7 +509,6 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::getFinalCloud() const
 
     //  关键修复：确保所有 GPU 操作完成后再复制数据到 Host
     cudaStreamSynchronize(stream_);
-    cudaDeviceSynchronize();  // 全局同步，确保所有设备操作完成
     
     //  检查 CUDA 错误状态
     cudaError_t err = cudaGetLastError();
@@ -407,13 +522,23 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::getFinalCloud() const
         return final_cloud;
     }
     
-    //  安全的 Device→Host 拷贝，带错误检查
-    thrust::host_vector<int> h_remaining_indices;
-    thrust::host_vector<GPUPoint3f> h_all_points;
+    size_t remaining_count = d_remaining_indices_.size();
     
+    // 优化：在 GPU 内部使用 gather 聚集剩余点到连续缓冲区（在 .cu 文件中实现）
+    gatherRemainingToCompact();
+    
+    // 检查 gather 操作错误
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[getFinalCloud]  gather操作错误: " 
+                  << cudaGetErrorString(err) << std::endl;
+        return final_cloud;
+    }
+
+    // 单次拷贝整块数据：从 GPU 连续缓冲区到 CPU
+    thrust::host_vector<GPUPoint3f> h_compact_points;
     try {
-        h_remaining_indices = d_remaining_indices_;
-        h_all_points = d_all_points_;
+        h_compact_points = d_compact_inliers_;
     } catch (const thrust::system_error &e) {
         std::cerr << "[getFinalCloud]  Thrust拷贝失败: " << e.what() << std::endl;
         err = cudaGetLastError();
@@ -421,25 +546,95 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::getFinalCloud() const
         return final_cloud;
     }
     
-    final_cloud->reserve(h_remaining_indices.size());
-    
-    for (int idx : h_remaining_indices) {
-        if (idx >= 0 && idx < h_all_points.size()) {
-            pcl::PointXYZI pt;
-            pt.x = h_all_points[idx].x;
-            pt.y = h_all_points[idx].y;
-            pt.z = h_all_points[idx].z;
-            pt.intensity = h_all_points[idx].intensity;  // 恢复强度信息
-            final_cloud->push_back(pt);
-        }
+    // 转换为 PCL 点云
+    final_cloud->reserve(remaining_count);
+    for (size_t i = 0; i < h_compact_points.size(); ++i)
+    {
+        const GPUPoint3f& gpu_pt = h_compact_points[i];
+        pcl::PointXYZI pt;
+        pt.x = gpu_pt.x;
+        pt.y = gpu_pt.y;
+        pt.z = gpu_pt.z;
+        pt.intensity = gpu_pt.intensity;
+        final_cloud->push_back(pt);
     }
     
     final_cloud->width = final_cloud->size();
     final_cloud->height = 1;
     final_cloud->is_dense = true;
     
-    
     return final_cloud;
+}
+
+void QuadricDetect::setStream(cudaStream_t stream)
+{
+    // 如果已有 stream 且拥有所有权，先销毁旧 stream
+    if (stream_ != nullptr && owns_stream_)
+    {
+        cudaStreamDestroy(stream_);
+    }
+    
+    stream_ = stream;
+    owns_stream_ = false;  // 外部管理流生命周期
+    
+    // 如果 cusolver_handle_ 已初始化，绑定流
+    if (cusolver_handle_ != nullptr)
+    {
+        cusolverDnSetStream(cusolver_handle_, stream_);
+    }
+}
+
+bool QuadricDetect::processCloudDirect(GPUPoint3f* d_points, size_t count)
+{
+    if (d_points == nullptr || count == 0)
+    {
+        std::cerr << "[processCloudDirect] 错误：输入参数无效" << std::endl;
+        return false;
+    }
+
+    if (stream_ == nullptr)
+    {
+        std::cerr << "[processCloudDirect] 错误：CUDA流未初始化" << std::endl;
+        return false;
+    }
+
+    auto total_start = std::chrono::high_resolution_clock::now();
+
+    // 重置内部状态（防止上一帧数据污染）
+    detected_primitives_.clear();
+    d_batch_inlier_counts_.clear();
+    d_batch_models_.clear();
+    d_best_model_index_.clear();
+    d_best_model_count_.clear();
+    d_remaining_indices_.clear();
+
+    // 零拷贝指针赋值
+    d_external_points_ = d_points;
+    is_external_memory_ = true;
+
+    // 初始化 d_remaining_indices_ 为 0..count-1（假设输入就是剩余点，已压实）
+    initializeRemainingIndices(count);
+
+    // 执行二次曲面检测
+    auto detect_start = std::chrono::high_resolution_clock::now();
+    findQuadrics_BatchGPU();
+    auto detect_end = std::chrono::high_resolution_clock::now();
+    float detect_time = std::chrono::duration<float, std::milli>(detect_end - detect_start).count();
+
+    auto total_end = std::chrono::high_resolution_clock::now();
+    float total_time = std::chrono::duration<float, std::milli>(total_end - total_start).count();
+
+    if (params_.verbosity > 0) {
+        std::cout << "[processCloudDirect] Timing breakdown:" << std::endl;
+        std::cout << "  Quadric detection: " << detect_time << " ms" << std::endl;
+        std::cout << "  Total: " << total_time << " ms" << std::endl;
+    }
+
+    // 注意：不重置外部内存标志，保持 is_external_memory_ 和 d_external_points_
+    // 以便后续 getFinalCloud() 和 extractInlierCloud() 能正确识别零拷贝模式
+    // 标志位由调用方在适当时候管理（如调用 getFinalCloud() 之后）
+
+    return true;
 }
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
@@ -453,7 +648,6 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
 
     //  确保 GPU 操作完成
     cudaStreamSynchronize(stream_);
-    cudaDeviceSynchronize();
     
     //  检查 CUDA 错误
     cudaError_t err = cudaGetLastError();
@@ -463,13 +657,21 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
         return inlier_cloud;
     }
 
-    // 从GPU拷贝内点索引到CPU（带异常处理）
-    thrust::host_vector<int> h_inlier_indices;
-    thrust::host_vector<GPUPoint3f> h_all_points;
+    // 优化：在 GPU 内部使用 gather 聚集内点到连续缓冲区（在 .cu 文件中实现）
+    gatherInliersToCompact();
     
+    // 检查 gather 操作错误
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[extractInlierCloud]  gather操作错误: " 
+                  << cudaGetErrorString(err) << std::endl;
+        return inlier_cloud;
+    }
+
+    // 单次拷贝整块数据：从 GPU 连续缓冲区到 CPU
+    thrust::host_vector<GPUPoint3f> h_compact_inliers;
     try {
-        h_inlier_indices = d_temp_inlier_indices_;
-        h_all_points = d_all_points_;
+        h_compact_inliers = d_compact_inliers_;
     } catch (const thrust::system_error &e) {
         std::cerr << "[extractInlierCloud]  Thrust拷贝失败: " << e.what() << std::endl;
         err = cudaGetLastError();
@@ -477,21 +679,17 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
         return inlier_cloud;
     }
 
+    // 转换为 PCL 点云
     inlier_cloud->reserve(current_inlier_count_);
-
-    // 根据索引构建点云
-    for (int i = 0; i < current_inlier_count_; ++i)
+    for (size_t i = 0; i < h_compact_inliers.size(); ++i)
     {
-        int idx = h_inlier_indices[i];
-        if (idx >= 0 && idx < h_all_points.size())
-        {
-            pcl::PointXYZI pt;
-            pt.x = h_all_points[idx].x;
-            pt.y = h_all_points[idx].y;
-            pt.z = h_all_points[idx].z;
-            pt.intensity = h_all_points[idx].intensity;  // 恢复强度信息（关键！）
-            inlier_cloud->push_back(pt);
-        }
+        const GPUPoint3f& gpu_pt = h_compact_inliers[i];
+        pcl::PointXYZI pt;
+        pt.x = gpu_pt.x;
+        pt.y = gpu_pt.y;
+        pt.z = gpu_pt.z;
+        pt.intensity = gpu_pt.intensity;
+        inlier_cloud->push_back(pt);
     }
 
     inlier_cloud->width = inlier_cloud->size();

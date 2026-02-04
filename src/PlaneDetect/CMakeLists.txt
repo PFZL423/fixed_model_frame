@@ -24,6 +24,7 @@ find_package(PCL 1.8 REQUIRED COMPONENTS
 find_package(Eigen3 REQUIRED)
 find_package(CUDA REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # 查找CUDA工具包路径
 find_path(CUDA_TOOLKIT_ROOT_DIR
@@ -184,6 +185,7 @@ target_link_libraries(plane_test_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${CUDA_LIBRARIES}
+  OpenMP::OpenMP_CXX
   cusolver
   curand
 )

@@ -176,12 +176,30 @@ public:
      */
     pcl::PointCloud<pcl::PointXYZI>::Ptr getFinalCloud() const;
 
+    /**
+     * @brief 设置CUDA流，绑定所有GPU操作到此流
+     * @param stream CUDA流句柄
+     */
+    void setStream(cudaStream_t stream);
+
+    /**
+     * @brief 零拷贝直接处理接口：从外部GPU缓冲区直接进行二次曲面检测
+     * @param d_points 外部GPU点云缓冲区指针（已压实）
+     * @param count 点云数量
+     * @return true表示处理成功，false表示输入无效或处理失败
+     */
+    bool processCloudDirect(GPUPoint3f* d_points, size_t count);
+
 private:
     // 添加这个新函数的声明
     void validateInversePowerResults(int batch_size);
     void outputBestModelDetails(const GPUQuadricModel &best_model, int inlier_count, int model_idx, int iteration);
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr extractInlierCloud() const;
+    
+    // GPU 辅助函数：在 .cu 文件中实现
+    void gatherInliersToCompact() const;  // 将内点聚集到 d_compact_inliers_
+    void gatherRemainingToCompact() const; // 将剩余点聚集到 d_compact_inliers_
     // 🆕 添加到QuadricDetect.h的public部分
     void performBatchInversePowerIteration(int batch_size);
     void launchComputeATA(int batch_size);
@@ -192,6 +210,7 @@ private:
     // 添加临时存储成员变量
     mutable thrust::device_vector<int> d_temp_inlier_indices_;
     mutable int current_inlier_count_;
+    mutable thrust::device_vector<GPUPoint3f> d_compact_inliers_;  // GPU内部聚集的内点缓冲区
 
     // ========================================
     // 核心数据成员
@@ -224,6 +243,9 @@ private:
     // ========================================
     cusolverDnHandle_t cusolver_handle_;                    ///< cuSolver句柄，用于批量SVD分解
     cudaStream_t stream_;                                   ///< CUDA流，用于异步计算
+    bool owns_stream_;                                      ///< 是否拥有流的生命周期
+    bool is_external_memory_;                              ///< 标记是否使用外部显存（零拷贝模式）
+    GPUPoint3f* d_external_points_;                        ///< 外部GPU点云指针（零拷贝模式）
 
     // ========================================
     // 数据转换层 (PCL ↔ GPU格式)
@@ -242,6 +264,12 @@ private:
      */
     Eigen::Matrix4f convertGPUModelToEigen(const GPUQuadricModel &gpu_model);
     
+    /**
+     * @brief 获取点云指针（支持外部内存）
+     * @return GPU点云指针
+     */
+    GPUPoint3f* getPointsPtr() const;
+
     /**
      * @brief 将10维SVD解向量转换为4×4二次曲面矩阵
      * @param q 10维解向量 (二次曲面系数)
@@ -278,6 +306,12 @@ private:
      * @param batch_size 批处理大小 (通常为1024)
      */
     void initializeGPUMemory(int batch_size);
+    
+    /**
+     * @brief 初始化剩余索引序列（使用 kernel，支持流绑定）
+     * @param count 索引数量
+     */
+    void initializeRemainingIndices(size_t count);
     
     /**
      * @brief 上传点云数据到GPU并初始化索引

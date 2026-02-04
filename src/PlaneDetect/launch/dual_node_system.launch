@@ -1,17 +1,10 @@
 <!-- 
-  双节点混合模型处理系统
-  自动按顺序启动：先节点2（等待），再节点1（处理）
+  统一节点混合模型处理系统
+  单节点实现：平面检测 + 二次曲面检测 + 超体素（零拷贝算法接力）
 -->
 <launch>
-    <!-- 节点2: 二次曲面检测（先启动，等待数据） -->
-    <node pkg="PlaneDetect" type="interface_test_node" name="quadric_detect_node" output="screen" launch-prefix="bash -c 'sleep 0.5; $0 $@'">
-        <!-- 更早启动，给0.5秒准备时间 -->
-        <rosparam file="$(find PlaneDetect)/config/plane_detection.yaml" command="load"/>
-    </node>
-
-    <!-- 节点1: 平面检测 + 超体素（稍后启动） -->
-    <node pkg="PlaneDetect" type="plane_test_node" name="plane_supervoxel_node" output="screen" launch-prefix="bash -c 'sleep 2.0; $0 $@'">
-        <!-- 延迟2秒启动，确保节点2已经准备好 -->
+    <!-- 统一节点: 平面检测 + 二次曲面检测 + 超体素 -->
+    <node pkg="PlaneDetect" type="plane_test_node" name="unified_detection_node" output="screen">
         <rosparam file="$(find PlaneDetect)/config/plane_detection.yaml" command="load"/>
     </node>
 

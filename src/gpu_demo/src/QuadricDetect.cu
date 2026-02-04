@@ -3,22 +3,55 @@
 #include <cusolverDn.h>
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>
+#include <thrust/extrema.h>  // 必须包含，用于 max_element
+#include <thrust/device_ptr.h>
+#include <thrust/gather.h>   // 用于 gather 操作
 #include <ctime>
 #include <iostream>
 #include <cmath>     // 添加这个头文件用于isfinite函数
 #include <algorithm> // 添加这个头文件用于min函数
 #include <stdexcept> // 用于 std::exception
+#include <chrono>    // 用于纳秒级时间戳
+#include <unistd.h>  // 用于 getpid()
 
 // ========================================
 // CUDA内核函数定义 (每个内核只定义一次!)
 // ========================================
 
+// 静态变量：保存初始化时的随机数状态地址
+static void* g_init_rand_states_addr = nullptr;
+
 __global__ void initCurandStates_Kernel(curandState *states, unsigned long seed, int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // 强制打印 GPU 端的索引：如果控制台没动静，说明内核罢工了
+    if (idx < 10) {
+        printf("Thread %d initializing\n", idx);
+    }
+    if (idx < n)
+    {
+        // 修正：使用 idx 作为 sequence 参数是 NVIDIA 官方推荐的确保 1024 个线程随机序列互不相关的标准做法
+        curand_init(seed, idx, 0, &states[idx]);
+    }
+}
+
+// 调试内核：验证随机数状态是否不同（不修改原始状态）
+__global__ void debugRandomStates_Kernel(const curandState *rand_states, int n, unsigned int *output_rands)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n)
     {
-        curand_init(seed, idx, 0, &states[idx]);
+        // 修复：使用 const 指针，创建临时副本，不修改原始状态
+        curandState temp_state = rand_states[idx];
+        // 生成3个随机数来验证状态是否不同
+        unsigned int r1 = curand(&temp_state);
+        unsigned int r2 = curand(&temp_state);
+        unsigned int r3 = curand(&temp_state);
+        // 存储到输出数组（每个状态3个随机数）
+        output_rands[idx * 3 + 0] = r1;
+        output_rands[idx * 3 + 1] = r2;
+        output_rands[idx * 3 + 2] = r3;
+        // 不恢复状态，因为使用的是临时副本
     }
 }
 
@@ -200,53 +233,6 @@ __device__ inline float evaluateQuadricDistance(
     return fabsf(result);
 }
 
-__global__ void findBestModel_Kernel(
-    const int *batch_inlier_counts,
-    int batch_size,
-    int *best_index,
-    int *best_count)
-{
-    int thread_id = threadIdx.x;
-    int local_best_idx = -1;
-    int local_best_count = 0;
-
-    // 每个线程处理多个模型
-    for (int i = thread_id; i < batch_size; i += blockDim.x)
-    {
-        if (batch_inlier_counts[i] > local_best_count)
-        {
-            local_best_count = batch_inlier_counts[i];
-            local_best_idx = i;
-        }
-    }
-
-    // Block内reduce找最大值
-    __shared__ int shared_counts[256];
-    __shared__ int shared_indices[256];
-
-    shared_counts[thread_id] = local_best_count;
-    shared_indices[thread_id] = local_best_idx;
-    __syncthreads();
-
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
-    {
-        if (thread_id < stride)
-        {
-            if (shared_counts[thread_id + stride] > shared_counts[thread_id])
-            {
-                shared_counts[thread_id] = shared_counts[thread_id + stride];
-                shared_indices[thread_id] = shared_indices[thread_id + stride];
-            }
-        }
-        __syncthreads();
-    }
-
-    if (thread_id == 0)
-    {
-        *best_count = shared_counts[0];
-        *best_index = shared_indices[0];
-    }
-}
 
 __global__ void extractInliers_Kernel(
     const GPUPoint3f *all_points,
@@ -322,22 +308,66 @@ __global__ void extractInliers_Kernel(
 // 成员函数实现 (每个函数只定义一次!)
 // ========================================
 
+// 初始化序列内核实现
+__global__ void initSequenceKernel(int *indices, int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n)
+    {
+        indices[idx] = idx;
+    }
+}
+
+// 辅助函数：获取点云指针（支持外部内存）
+GPUPoint3f* QuadricDetect::getPointsPtr() const
+{
+    if (is_external_memory_)
+    {
+        return d_external_points_;
+    }
+    else
+    {
+        return const_cast<GPUPoint3f*>(thrust::raw_pointer_cast(d_all_points_.data()));
+    }
+}
+
 void QuadricDetect::initializeGPUMemory(int batch_size)
 {
     // 分配GPU内存
     d_batch_matrices_.resize(batch_size * 9 * 10);
     d_batch_models_.resize(batch_size);
     d_batch_inlier_counts_.resize(batch_size);
-    d_rand_states_.resize(batch_size);
+    d_rand_states_.resize(batch_size * 10);
 
     // 初始化结果存储
     d_best_model_index_.resize(1);
     d_best_model_count_.resize(1);
+    
+    // 修复：初始化为0，确保有有效的初始值
+    thrust::fill(thrust::cuda::par.on(stream_), d_best_model_index_.begin(), d_best_model_index_.end(), 0);
+    thrust::fill(thrust::cuda::par.on(stream_), d_best_model_count_.begin(), d_best_model_count_.end(), 0);
 
     //  添加反幂迭代相关
     d_batch_ATA_matrices_.resize(batch_size * 10 * 10);
     d_batch_R_matrices_.resize(batch_size * 10 * 10);
     d_batch_eigenvectors_.resize(batch_size * 10);
+}
+
+void QuadricDetect::initializeRemainingIndices(size_t count)
+{
+    if (count > 0) {
+        d_remaining_indices_.resize(count);
+        // 使用 kernel 初始化序列（因为 thrust::sequence 不支持流绑定）
+        dim3 block(256);
+        dim3 grid((count + block.x - 1) / block.x);
+        initSequenceKernel<<<grid, block, 0, stream_>>>(
+            thrust::raw_pointer_cast(d_remaining_indices_.data()),
+            static_cast<int>(count));
+    }
+    else
+    {
+        d_remaining_indices_.clear();
+    }
 }
 
 void QuadricDetect::uploadPointsToGPU(const std::vector<GPUPoint3f> &h_points)
@@ -355,22 +385,52 @@ void QuadricDetect::uploadPointsToGPU(const std::vector<GPUPoint3f> &h_points)
 void QuadricDetect::launchInitCurandStates(int batch_size)
 {
     dim3 block(256);
-    dim3 grid((batch_size + block.x - 1) / block.x);
+    dim3 grid((batch_size * 10 + block.x - 1) / block.x);
 
-    initCurandStates_Kernel<<<grid, block, 0, stream_>>>(
+    // 加入 clock() 增加随机性
+    unsigned long base_seed = (unsigned long)time(nullptr) ^ (unsigned long)clock();
+
+    // 检查显存地址：打印初始化时的地址
+    g_init_rand_states_addr = thrust::raw_pointer_cast(d_rand_states_.data());
+    std::cout << "[launchInitCurandStates] 初始化时 d_rand_states_ 地址: " << g_init_rand_states_addr << std::endl;
+
+    initCurandStates_Kernel<<<grid, block, 0, stream_>>>( 
         thrust::raw_pointer_cast(d_rand_states_.data()),
-        time(nullptr),
-        batch_size);
-    cudaStreamSynchronize(stream_);
+        base_seed,
+        batch_size * 10);
+    
+    // 检查内核是否启动成功：如果 err 不是 cudaSuccess，那就破案了
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "!!! FATAL: initCurandStates_Kernel failed: " 
+                  << cudaGetErrorString(err) << std::endl;
+    } else {
+        std::cout << "[launchInitCurandStates] 内核启动成功" << std::endl;
+    }
+    
+    // 强制同步并检查
+    cudaError_t sync_err = cudaStreamSynchronize(stream_);
+    if (sync_err != cudaSuccess) {
+        std::cerr << "!!! FATAL: initCurandStates_Kernel sync failed: " 
+                  << cudaGetErrorString(sync_err) << std::endl;
+    } else {
+        std::cout << "[launchInitCurandStates] 内核同步成功" << std::endl;
+    }
 }
 
 void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
 {
+    // 核心修复：定义 total_points（支持零拷贝模式）
+    size_t total_points = is_external_memory_ ? d_remaining_indices_.size() : d_all_points_.size();
+    
+    // 获取初始化时的地址用于比较（从 launchInitCurandStates 中保存的静态变量）
+    extern void* g_init_rand_states_addr;  // 声明外部静态变量
+
     if (params_.verbosity > 0)
     {
         std::cout << "[launchSampleAndBuildMatrices] 开始生成批量矩阵，batch_size=" << batch_size << std::endl;
         std::cout << "  - 剩余点数: " << d_remaining_indices_.size() << std::endl;
-        std::cout << "  - 总点数: " << d_all_points_.size() << std::endl;
+        std::cout << "  - 总点数: " << total_points << std::endl;
     }
 
     //  验证输入数据
@@ -380,7 +440,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         return;
     }
 
-    if (d_all_points_.size() == 0)
+    if (total_points == 0)
     {
         std::cerr << "[launchSampleAndBuildMatrices]  错误：点云数据为空！" << std::endl;
         return;
@@ -392,9 +452,9 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         std::cout << "[launchSampleAndBuildMatrices]  验证输入点云数据有效性..." << std::endl;
 
         // 检查前几个点的数据
-        thrust::host_vector<GPUPoint3f> h_sample_points(std::min(10, (int)d_all_points_.size()));
+        thrust::host_vector<GPUPoint3f> h_sample_points(std::min(10, static_cast<int>(total_points)));
         cudaMemcpy(h_sample_points.data(),
-                   thrust::raw_pointer_cast(d_all_points_.data()),
+                   getPointsPtr(),
                    h_sample_points.size() * sizeof(GPUPoint3f),
                    cudaMemcpyDeviceToHost);
 
@@ -435,11 +495,23 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     dim3 block(256);
     dim3 grid((batch_size + block.x - 1) / block.x);
 
+    // 检查显存地址：打印采样时的地址
+    void* sample_addr = thrust::raw_pointer_cast(d_rand_states_.data());
+    std::cout << "[launchSampleAndBuildMatrices] 采样时 d_rand_states_ 地址: " << sample_addr << std::endl;
+    
+    // 从 launchInitCurandStates 获取初始化时的地址（通过静态变量）
+    // 注意：这里需要确保 launchInitCurandStates 已经调用过
+    // 如果地址不同，说明 Thrust 在中间偷偷搬了家
+    if (g_init_rand_states_addr != nullptr && sample_addr != g_init_rand_states_addr) {
+        std::cerr << "!!! WARNING: d_rand_states_ 地址已改变！初始化时: " << g_init_rand_states_addr 
+                  << ", 采样时: " << sample_addr << std::endl;
+    }
+
     //  先清零矩阵数据，确保没有垃圾数据
-    thrust::fill(d_batch_matrices_.begin(), d_batch_matrices_.end(), 0.0f);
+    thrust::fill(thrust::cuda::par.on(stream_), d_batch_matrices_.begin(), d_batch_matrices_.end(), 0.0f);
 
     sampleAndBuildMatrices_Kernel<<<grid, block, 0, stream_>>>(
-        thrust::raw_pointer_cast(d_all_points_.data()),
+        getPointsPtr(),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
         thrust::raw_pointer_cast(d_rand_states_.data()),
@@ -460,6 +532,63 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     {
         std::cerr << "[launchSampleAndBuildMatrices]  内核执行错误: " << cudaGetErrorString(sync_error) << std::endl;
         return;
+    }
+
+    // 调试信息：验证随机数状态是否不同
+    if (params_.verbosity > 1)
+    {
+        std::cout << "[launchSampleAndBuildMatrices] 验证随机数状态..." << std::endl;
+        
+        // 创建临时设备内存存储随机数输出
+        thrust::device_vector<unsigned int> d_rand_outputs(std::min(3, batch_size) * 3);
+        dim3 debug_block(256);
+        dim3 debug_grid((std::min(3, batch_size) + debug_block.x - 1) / debug_block.x);
+        
+        debugRandomStates_Kernel<<<debug_grid, debug_block, 0, stream_>>>(
+            thrust::raw_pointer_cast(d_rand_states_.data()),
+            std::min(3, batch_size),
+            thrust::raw_pointer_cast(d_rand_outputs.data()));
+        cudaStreamSynchronize(stream_);
+        cudaStreamSynchronize(stream_);
+        
+        // 读取并打印
+        thrust::host_vector<unsigned int> h_rand_outputs = d_rand_outputs;
+        std::cout << "  前3个模型的随机数状态验证（每个状态生成3个随机数）:" << std::endl;
+        for (int model_id = 0; model_id < 3 && model_id < batch_size; ++model_id)
+        {
+            std::cout << "    模型 " << model_id << " (rand_states[" << model_id << "]): "
+                      << h_rand_outputs[model_id * 3 + 0] << ", "
+                      << h_rand_outputs[model_id * 3 + 1] << ", "
+                      << h_rand_outputs[model_id * 3 + 2] << std::endl;
+        }
+    }
+    
+    // 调试信息：打印前3个模型采样的点（通过矩阵推断）和随机数状态
+    if (params_.verbosity > 1)
+    {
+        std::cout << "[launchSampleAndBuildMatrices] 检查前3个模型的采样点..." << std::endl;
+        
+        // 从矩阵中提取采样点的坐标（矩阵的第一行包含第一个采样点的 x², y², z², xy, xz, yz, x, y, z, 1）
+        thrust::host_vector<float> h_matrices_sample(3 * 9 * 10);
+        cudaMemcpy(h_matrices_sample.data(),
+                   thrust::raw_pointer_cast(d_batch_matrices_.data()),
+                   3 * 9 * 10 * sizeof(float),
+                   cudaMemcpyDeviceToHost);
+        
+        for (int model_id = 0; model_id < 3 && model_id < batch_size; ++model_id)
+        {
+            const float* A = &h_matrices_sample[model_id * 90];
+            std::cout << "  模型 " << model_id << " 的采样点（从矩阵推断）:" << std::endl;
+            
+            // 打印所有9个采样点
+            for (int i = 0; i < 9; ++i)
+            {
+                float x = A[6 * 9 + i];
+                float y = A[7 * 9 + i];
+                float z = A[8 * 9 + i];
+                std::cout << "    点[" << i << "]: (" << x << ", " << y << ", " << z << ")" << std::endl;
+            }
+        }
     }
 
     //  验证生成的矩阵数据
@@ -489,9 +618,9 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
             std::cerr << "[launchSampleAndBuildMatrices]  生成的矩阵全为零！检查内核实现" << std::endl;
 
             //  检查输入点云数据
-            thrust::host_vector<GPUPoint3f> h_points_sample(std::min(10, (int)d_all_points_.size()));
+            thrust::host_vector<GPUPoint3f> h_points_sample(std::min(10, static_cast<int>(total_points)));
             cudaMemcpy(h_points_sample.data(),
-                       thrust::raw_pointer_cast(d_all_points_.data()),
+                       getPointsPtr(),
                        h_points_sample.size() * sizeof(GPUPoint3f),
                        cudaMemcpyDeviceToHost);
 
@@ -536,27 +665,109 @@ void QuadricDetect::launchCountInliersBatch(int batch_size)
     dim3 grid(grid_x.x, batch_size); // 2D grid: (points, models)
 
     // 先清零计数器
-    thrust::fill(d_batch_inlier_counts_.begin(), d_batch_inlier_counts_.end(), 0);
+    thrust::fill(thrust::cuda::par.on(stream_), d_batch_inlier_counts_.begin(), d_batch_inlier_counts_.end(), 0);
 
     countInliersBatch_Kernel<<<grid, block, 0, stream_>>>(
-        thrust::raw_pointer_cast(d_all_points_.data()),
+        getPointsPtr(),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
         thrust::raw_pointer_cast(d_batch_models_.data()),
         batch_size,
         static_cast<float>(params_.quadric_distance_threshold),
         thrust::raw_pointer_cast(d_batch_inlier_counts_.data()));
+    
+    // 检查 CUDA 错误
+    cudaError_t kernel_error = cudaGetLastError();
+    if (kernel_error != cudaSuccess)
+    {
+        std::cerr << "[launchCountInliersBatch] 内核启动错误: " << cudaGetErrorString(kernel_error) << std::endl;
+    }
+    
     cudaStreamSynchronize(stream_);
+    
+    // 检查同步错误
+    cudaError_t sync_error = cudaGetLastError();
+    if (sync_error != cudaSuccess)
+    {
+        std::cerr << "[launchCountInliersBatch] 内核执行错误: " << cudaGetErrorString(sync_error) << std::endl;
+    }
+    
+    // 调试信息：打印前10个模型的内点计数
+    if (params_.verbosity > 1)
+    {
+        thrust::host_vector<int> h_inlier_counts(std::min(10, batch_size));
+        thrust::copy_n(d_batch_inlier_counts_.begin(), std::min(10, batch_size), h_inlier_counts.begin());
+        
+        std::cout << "[launchCountInliersBatch] 前10个模型的内点计数:" << std::endl;
+        for (int i = 0; i < std::min(10, batch_size); ++i)
+        {
+            std::cout << "  模型 " << i << ": " << h_inlier_counts[i] << " 个内点" << std::endl;
+        }
+        
+        // 统计所有模型的内点计数
+        thrust::host_vector<int> h_all_counts = d_batch_inlier_counts_;
+        int total_inliers = 0;
+        int max_inliers = 0;
+        int max_idx = 0;
+        for (int i = 0; i < batch_size; ++i)
+        {
+            total_inliers += h_all_counts[i];
+            if (h_all_counts[i] > max_inliers)
+            {
+                max_inliers = h_all_counts[i];
+                max_idx = i;
+            }
+        }
+        std::cout << "[launchCountInliersBatch] 统计信息:" << std::endl;
+        std::cout << "  总内点数: " << total_inliers << std::endl;
+        std::cout << "  最大内点数: " << max_inliers << " (模型 " << max_idx << ")" << std::endl;
+        std::cout << "  平均内点数: " << (batch_size > 0 ? static_cast<float>(total_inliers) / batch_size : 0.0f) << std::endl;
+    }
 }
 
 void QuadricDetect::launchFindBestModel(int batch_size)
 {
-    findBestModel_Kernel<<<1, 256, 0, stream_>>>(
-        thrust::raw_pointer_cast(d_batch_inlier_counts_.data()),
-        batch_size,
-        thrust::raw_pointer_cast(d_best_model_index_.data()),
-        thrust::raw_pointer_cast(d_best_model_count_.data()));
+    // 1. 获取 Thrust 指针
+    thrust::device_ptr<int> inlier_counts_ptr = thrust::device_pointer_cast(
+        thrust::raw_pointer_cast(d_batch_inlier_counts_.data()));
+
+    // 2. 使用官方库找最大值 (绑定流)
+    // 注意：这将直接返回最大值的迭代器，无需手写 reduction
+    auto max_iter = thrust::max_element(
+        thrust::cuda::par.on(stream_), 
+        inlier_counts_ptr, 
+        inlier_counts_ptr + batch_size
+    );
+
+    // 3. 计算索引
+    int best_idx = max_iter - inlier_counts_ptr;
+    
+    // 4. 获取最大值
+    int best_count = *max_iter;
+    
+    // 5. 异步拷贝结果到设备内存
+    cudaMemcpyAsync(
+        thrust::raw_pointer_cast(d_best_model_index_.data()), 
+        &best_idx, 
+        sizeof(int), 
+        cudaMemcpyHostToDevice, 
+        stream_
+    );
+
+    cudaMemcpyAsync(
+        thrust::raw_pointer_cast(d_best_model_count_.data()), 
+        &best_count, 
+        sizeof(int), 
+        cudaMemcpyHostToDevice, 
+        stream_
+    );
+
     cudaStreamSynchronize(stream_);
+    
+    // 调试验证
+    if (params_.verbosity > 0) {
+        std::cout << "[Thrust] Best Index: " << best_idx << " Count: " << best_count << std::endl;
+    }
 }
 
 // 替换你 QuadricDetect.cu 文件中的占位符实现：
@@ -585,7 +796,9 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
         return;
     }
 
-    if (d_all_points_.size() == 0)
+    // 检查点云数据是否有效
+    GPUPoint3f* points_ptr = getPointsPtr();
+    if (points_ptr == nullptr)
     {
         std::cerr << "[launchExtractInliers] 错误：点云数据为空！" << std::endl;
         current_inlier_count_ = 0;
@@ -593,7 +806,7 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
     }
 
     std::cout << "  - 剩余点数: " << d_remaining_indices_.size() << std::endl;
-    std::cout << "  - 总点数: " << d_all_points_.size() << std::endl;
+    std::cout << "  - 使用外部内存: " << (is_external_memory_ ? "是" : "否") << std::endl;
     std::cout << "  - 距离阈值: " << params_.quadric_distance_threshold << std::endl;
 
     //  关键修复：将model从CPU拷贝到GPU专用内存
@@ -615,7 +828,7 @@ void QuadricDetect::launchExtractInliers(const GPUQuadricModel *model)
 
     //  修复：使用安全的GPU内存而不是CPU指针
     extractInliers_Kernel<<<grid, block, 0, stream_>>>(
-        thrust::raw_pointer_cast(d_all_points_.data()),
+        getPointsPtr(),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
         thrust::raw_pointer_cast(d_model_safe.data()), //  使用GPU内存
@@ -1133,4 +1346,82 @@ void QuadricDetect::uploadPointsToGPU(const thrust::device_vector<GPUPoint3f> &h
     d_all_points_ = h_points;
     d_remaining_indices_.resize(h_points.size());
     thrust::sequence(d_remaining_indices_.begin(), d_remaining_indices_.end(), 0);
+}
+
+// GPU 辅助函数：将内点聚集到紧凑缓冲区
+void QuadricDetect::gatherInliersToCompact() const
+{
+    if (d_temp_inlier_indices_.empty() || current_inlier_count_ == 0)
+    {
+        return;
+    }
+    
+    // 在 GPU 内部使用 gather 聚集内点到连续缓冲区
+    d_compact_inliers_.resize(current_inlier_count_);
+    
+    if (is_external_memory_ && d_external_points_ != nullptr)
+    {
+        // 外部内存模式：使用 thrust::gather 从外部指针聚集内点
+        thrust::device_ptr<GPUPoint3f> external_ptr = thrust::device_pointer_cast(d_external_points_);
+        thrust::gather(
+            thrust::cuda::par.on(stream_),
+            d_temp_inlier_indices_.begin(),
+            d_temp_inlier_indices_.begin() + current_inlier_count_,
+            external_ptr,
+            d_compact_inliers_.begin()
+        );
+    }
+    else
+    {
+        // 内部内存模式：使用 thrust::gather 从 d_all_points_ 聚集内点
+        thrust::gather(
+            thrust::cuda::par.on(stream_),
+            d_temp_inlier_indices_.begin(),
+            d_temp_inlier_indices_.begin() + current_inlier_count_,
+            d_all_points_.begin(),
+            d_compact_inliers_.begin()
+        );
+    }
+    
+    cudaStreamSynchronize(stream_);
+}
+
+// GPU 辅助函数：将剩余点聚集到紧凑缓冲区
+void QuadricDetect::gatherRemainingToCompact() const
+{
+    if (d_remaining_indices_.empty())
+    {
+        return;
+    }
+    
+    size_t remaining_count = d_remaining_indices_.size();
+    
+    // 在 GPU 内部使用 gather 聚集剩余点到连续缓冲区
+    d_compact_inliers_.resize(remaining_count);
+    
+    if (is_external_memory_ && d_external_points_ != nullptr)
+    {
+        // 外部内存模式：使用 thrust::gather 从外部指针聚集剩余点
+        thrust::device_ptr<GPUPoint3f> external_ptr = thrust::device_pointer_cast(d_external_points_);
+        thrust::gather(
+            thrust::cuda::par.on(stream_),
+            d_remaining_indices_.begin(),
+            d_remaining_indices_.end(),
+            external_ptr,
+            d_compact_inliers_.begin()
+        );
+    }
+    else
+    {
+        // 内部内存模式：使用 thrust::gather 从 d_all_points_ 聚集剩余点
+        thrust::gather(
+            thrust::cuda::par.on(stream_),
+            d_remaining_indices_.begin(),
+            d_remaining_indices_.end(),
+            d_all_points_.begin(),
+            d_compact_inliers_.begin()
+        );
+    }
+    
+    cudaStreamSynchronize(stream_);
 }
