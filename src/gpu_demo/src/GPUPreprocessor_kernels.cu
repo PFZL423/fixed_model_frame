@@ -900,6 +900,40 @@ void GPUPreprocessor::cuda_compactValidPoints()
     d_temp_points_ = d_output_points_;
 }
 
+void GPUPreprocessor::cuda_prepareInputBuffer(size_t count)
+{
+    // 在.cu文件中，resize是安全的
+    if (d_input_points_.size() < count)
+    {
+        d_input_points_.resize(count);
+    }
+}
+
+void GPUPreprocessor::cuda_unpackROSMsg(
+    const uint8_t* d_raw_data,
+    GPUPoint3f* d_output_points,
+    int point_step,
+    int x_offset, int y_offset, int z_offset, int intensity_offset,
+    uint8_t x_datatype, uint8_t y_datatype, uint8_t z_datatype, uint8_t intensity_datatype,
+    size_t num_points
+)
+{
+    if (num_points == 0 || d_raw_data == nullptr || d_output_points == nullptr)
+        return;
+
+    dim3 block(256);
+    dim3 grid((num_points + block.x - 1) / block.x);
+    
+    unpackROSMsgKernel<<<grid, block, 0, stream_>>>(
+        d_raw_data,
+        d_output_points,
+        point_step,
+        x_offset, y_offset, z_offset, intensity_offset,
+        x_datatype, y_datatype, z_datatype, intensity_datatype,
+        num_points
+    );
+}
+
 void GPUPreprocessor::cuda_uploadGPUPoints(const GPUPoint3f* h_pinned_points, size_t count)
 {
     if (count == 0 || h_pinned_points == nullptr)
@@ -1752,3 +1786,75 @@ namespace GPUBucketSort
     }
 
 } // namespace GPUBucketSort
+
+// ========== ROS消息解包相关 ==========
+// 数据类型常量定义（与sensor_msgs::PointField一致）
+namespace {
+    constexpr uint8_t POINT_FIELD_INT8 = 1;
+    constexpr uint8_t POINT_FIELD_UINT8 = 2;
+    constexpr uint8_t POINT_FIELD_INT16 = 3;
+    constexpr uint8_t POINT_FIELD_UINT16 = 4;
+    constexpr uint8_t POINT_FIELD_INT32 = 5;
+    constexpr uint8_t POINT_FIELD_UINT32 = 6;
+    constexpr uint8_t POINT_FIELD_FLOAT32 = 7;
+    constexpr uint8_t POINT_FIELD_FLOAT64 = 8;
+}
+
+// 数据类型读取辅助函数
+__device__ inline float readFloat(const uint8_t* ptr, uint8_t datatype)
+{
+    switch (datatype)
+    {
+        case POINT_FIELD_FLOAT32:
+            return *reinterpret_cast<const float*>(ptr);
+        case POINT_FIELD_FLOAT64:
+            return static_cast<float>(*reinterpret_cast<const double*>(ptr));
+        case POINT_FIELD_INT8:
+            return static_cast<float>(*reinterpret_cast<const int8_t*>(ptr));
+        case POINT_FIELD_UINT8:
+            return static_cast<float>(*reinterpret_cast<const uint8_t*>(ptr));
+        case POINT_FIELD_INT16:
+            return static_cast<float>(*reinterpret_cast<const int16_t*>(ptr));
+        case POINT_FIELD_UINT16:
+            return static_cast<float>(*reinterpret_cast<const uint16_t*>(ptr));
+        case POINT_FIELD_INT32:
+            return static_cast<float>(*reinterpret_cast<const int32_t*>(ptr));
+        case POINT_FIELD_UINT32:
+            return static_cast<float>(*reinterpret_cast<const uint32_t*>(ptr));
+        default:
+            return 0.0f; // 不支持的类型，返回0
+    }
+}
+
+// ROS消息解包内核
+__global__ void unpackROSMsgKernel(
+    const uint8_t* raw_data,
+    GPUPoint3f* output_points,
+    int point_step,
+    int x_offset, int y_offset, int z_offset, int intensity_offset,
+    uint8_t x_datatype, uint8_t y_datatype, uint8_t z_datatype, uint8_t intensity_datatype,
+    size_t num_points
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_points)
+        return;
+
+    const uint8_t* point_data = raw_data + idx * point_step;
+    GPUPoint3f& out = output_points[idx];
+
+    // 解析x, y, z（必须存在）
+    out.x = readFloat(point_data + x_offset, x_datatype);
+    out.y = readFloat(point_data + y_offset, y_datatype);
+    out.z = readFloat(point_data + z_offset, z_datatype);
+
+    // 解析intensity（如果存在）
+    if (intensity_offset >= 0)
+    {
+        out.intensity = readFloat(point_data + intensity_offset, intensity_datatype);
+    }
+    else
+    {
+        out.intensity = 0.0f;
+    }
+}

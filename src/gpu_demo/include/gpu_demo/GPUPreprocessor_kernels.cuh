@@ -294,6 +294,17 @@ namespace SpatialHashOutlier {
         int hash_table_size);
 }
 
+// ========== ROS消息解包相关 ==========
+// ROS消息解包内核
+__global__ void unpackROSMsgKernel(
+    const uint8_t* raw_data,
+    GPUPoint3f* output_points,
+    int point_step,
+    int x_offset, int y_offset, int z_offset, int intensity_offset,
+    uint8_t x_datatype, uint8_t y_datatype, uint8_t z_datatype, uint8_t intensity_datatype,
+    size_t num_points
+);
+
 // ========== CUDA错误检查宏 ==========
 #define CUDA_CHECK(call)                                                                                \
     do                                                                                                  \

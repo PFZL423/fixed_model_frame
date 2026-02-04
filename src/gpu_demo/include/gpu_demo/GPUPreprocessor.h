@@ -130,6 +130,16 @@ public:
     ProcessingResult process(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cpu_cloud,
                              const PreprocessConfig &config);
 
+    // Raw Data处理接口（新增）
+    ProcessingResult processRawMsg(
+        const uint8_t* d_raw_data,  // GPU上的raw data指针
+        size_t num_points,
+        int point_step,
+        int x_offset, int y_offset, int z_offset, int intensity_offset,
+        uint8_t x_datatype, uint8_t y_datatype, uint8_t z_datatype, uint8_t intensity_datatype,
+        const PreprocessConfig &config
+    );
+
     // 内存管理
     void reserveMemory(size_t max_points);
     void clearMemory();
@@ -195,6 +205,7 @@ private:
     thrust::device_vector<GPUPoint3f> d_temp_points_;
     thrust::device_vector<GPUPoint3f> d_output_points_;
     thrust::device_vector<GPUPointNormal3f> d_output_points_normal_;
+    thrust::device_vector<uint8_t> d_raw_input_;  // Raw data临时缓冲区（新增）
 
     // 体素下采样相关
     thrust::device_vector<uint64_t> d_voxel_keys_;
@@ -231,6 +242,19 @@ private:
 
     // GPU上传函数（在.cu中实现，使用异步上传和 pinned memory）
     void cuda_uploadGPUPoints(const GPUPoint3f* h_pinned_points, size_t count);
+    
+    // 准备输入缓冲区（在.cu中实现，用于Raw Data处理）
+    void cuda_prepareInputBuffer(size_t count);
+    
+    // 解包ROS消息（在.cu中实现，调用unpackROSMsgKernel）
+    void cuda_unpackROSMsg(
+        const uint8_t* d_raw_data,
+        GPUPoint3f* d_output_points,
+        int point_step,
+        int x_offset, int y_offset, int z_offset, int intensity_offset,
+        uint8_t x_datatype, uint8_t y_datatype, uint8_t z_datatype, uint8_t intensity_datatype,
+        size_t num_points
+    );
 
     // 获取GPU结果的引用（供后续模块使用）
     const thrust::device_vector<GPUPoint3f> &getOutputPoints() const { return d_output_points_; }

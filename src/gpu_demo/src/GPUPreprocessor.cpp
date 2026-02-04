@@ -1,9 +1,12 @@
 #include "gpu_demo/GPUPreprocessor.h"
+#include "gpu_demo/GPUPreprocessor_kernels.cuh"
 #include <iostream>
 #include <chrono>
 #include <stdexcept>
 #include <cmath>
 #include <omp.h>
+#include <cuda_runtime.h>
+#include <thrust/device_ptr.h>
 
 // ========== 构造函数与析构函数 ==========
 GPUPreprocessor::GPUPreprocessor()
@@ -112,6 +115,80 @@ ProcessingResult GPUPreprocessor::process(const pcl::PointCloud<pcl::PointXYZ>::
 
     return result;
 }
+
+// ========== Raw Data处理接口实现 ==========
+ProcessingResult GPUPreprocessor::processRawMsg(
+    const uint8_t* d_raw_data,
+    size_t num_points,
+    int point_step,
+    int x_offset, int y_offset, int z_offset, int intensity_offset,
+    uint8_t x_datatype, uint8_t y_datatype, uint8_t z_datatype, uint8_t intensity_datatype,
+    const PreprocessConfig &config)
+{
+    auto start_time = std::chrono::high_resolution_clock::now();
+    last_stats_ = PerformanceStats{};
+
+    // 验证必需字段存在
+    if (x_offset < 0 || y_offset < 0 || z_offset < 0)
+    {
+        std::cerr << "[processRawMsg] 错误：必需字段x, y, z未找到" << std::endl;
+        return ProcessingResult();
+    }
+
+    if (num_points == 0)
+    {
+        std::cerr << "[processRawMsg] 错误：点数为0" << std::endl;
+        return ProcessingResult();
+    }
+
+    // Step 1: 准备d_input_points_缓冲区（在.cu文件中实现resize）
+    cuda_prepareInputBuffer(num_points);
+
+    // Step 2: GPU并行解包（在.cu文件中实现）
+    auto unpack_start = std::chrono::high_resolution_clock::now();
+    
+    cuda_unpackROSMsg(
+        d_raw_data,
+        thrust::raw_pointer_cast(d_input_points_.data()),
+        point_step,
+        x_offset, y_offset, z_offset, intensity_offset,
+        x_datatype, y_datatype, z_datatype, intensity_datatype,
+        num_points
+    );
+    
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[processRawMsg] 解包内核启动失败: " << cudaGetErrorString(err) << std::endl;
+        return ProcessingResult();
+    }
+    
+    // 同步等待解包完成
+    cudaStreamSynchronize(stream_);
+    
+    auto unpack_end = std::chrono::high_resolution_clock::now();
+    float unpack_time = std::chrono::duration<float, std::milli>(unpack_end - unpack_start).count();
+    last_stats_.upload_time_ms = unpack_time; // 使用upload_time_ms字段存储解包时间
+
+    // Step 3: GPU预处理
+    preprocessOnGPU(config);
+
+    // Step 4: 创建结果对象
+    ProcessingResult result = createResult(config);
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    last_stats_.total_time_ms = std::chrono::duration<float, std::milli>(end_time - start_time).count();
+
+    std::cout << "[GPUPreprocessor] Raw data processing completed:" << std::endl;
+    std::cout << "  - GPU并行解包: " << unpack_time << "ms" << std::endl;
+    std::cout << "  - Voxel Filter: " << last_stats_.voxel_filter_time_ms << "ms" << std::endl;
+    std::cout << "  - Outlier Removal: " << last_stats_.outlier_removal_time_ms << "ms" << std::endl;
+    std::cout << "  - Normal Estimation: " << last_stats_.normal_estimation_time_ms << "ms" << std::endl;
+    std::cout << "  - Total: " << last_stats_.total_time_ms << "ms" << std::endl;
+
+    return result;
+}
+
 void GPUPreprocessor::preprocessOnGPU(const PreprocessConfig &config)
 {
     // 初始化工作点云

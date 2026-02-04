@@ -289,59 +289,78 @@ private:
         
         ROS_INFO("Received point cloud with %d points", msg->width * msg->height);
 
-        // ========== 计时：ROS消息转换 ==========
-        auto ros_convert_start = std::chrono::high_resolution_clock::now();
-        pcl::PointCloud<pcl::PointXYZI>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZI>);
-        pcl::fromROSMsg(*msg, *input_cloud);
-        auto ros_convert_end = std::chrono::high_resolution_clock::now();
-        float ros_convert_time = std::chrono::duration<float, std::milli>(ros_convert_end - ros_convert_start).count();
-
-        if (input_cloud->empty())
+        size_t num_points = msg->width * msg->height;
+        if (num_points == 0)
         {
             ROS_WARN("Received empty point cloud");
             return;
         }
 
-        // ========== 计时：点云格式转换 ==========
-        auto format_convert_start = std::chrono::high_resolution_clock::now();
-        // ========== Step 1: GPU 预处理（体素下采样 + 离群点移除）==========
-        // 转换为 PointXYZ（GPUPreprocessor 当前只支持 PointXYZ）
-        // 使用 OpenMP 并行化点云转换，提升性能
-        pcl::PointCloud<pcl::PointXYZ>::Ptr input_xyz(new pcl::PointCloud<pcl::PointXYZ>);
-        input_xyz->points.resize(input_cloud->size());
-        input_xyz->width = input_cloud->size();
-        input_xyz->height = 1;
-        input_xyz->is_dense = false;  // 可能包含无效点，稍后过滤
-        
-        #pragma omp parallel for
-        for (size_t i = 0; i < input_cloud->size(); ++i)
+        // ========== 解析字段偏移 ==========
+        int x_offset = -1, y_offset = -1, z_offset = -1, intensity_offset = -1;
+        uint8_t x_datatype = 0, y_datatype = 0, z_datatype = 0, intensity_datatype = 0;
+
+        for (const auto& field : msg->fields)
         {
-            const auto &pt = input_cloud->points[i];
-            if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
+            if (field.name == "x")
             {
-                input_xyz->points[i] = pcl::PointXYZ(pt.x, pt.y, pt.z);
+                x_offset = field.offset;
+                x_datatype = field.datatype;
             }
-            else
+            else if (field.name == "y")
             {
-                // 标记为无效点（使用 NaN）
-                input_xyz->points[i].x = std::numeric_limits<float>::quiet_NaN();
-                input_xyz->points[i].y = std::numeric_limits<float>::quiet_NaN();
-                input_xyz->points[i].z = std::numeric_limits<float>::quiet_NaN();
+                y_offset = field.offset;
+                y_datatype = field.datatype;
+            }
+            else if (field.name == "z")
+            {
+                z_offset = field.offset;
+                z_datatype = field.datatype;
+            }
+            else if (field.name == "intensity")
+            {
+                intensity_offset = field.offset;
+                intensity_datatype = field.datatype;
             }
         }
+
+        // 验证必需字段
+        if (x_offset < 0 || y_offset < 0 || z_offset < 0)
+        {
+            ROS_ERROR("必需字段x, y, z未找到，无法处理点云");
+            return;
+        }
+
+        // ========== 计时：GPU Raw数据上传 ==========
+        auto raw_upload_start = std::chrono::high_resolution_clock::now();
         
-        // 过滤无效点
-        input_xyz->points.erase(
-            std::remove_if(input_xyz->points.begin(), input_xyz->points.end(),
-                           [](const pcl::PointXYZ& pt) {
-                               return !std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z);
-                           }),
-            input_xyz->points.end());
-        input_xyz->width = input_xyz->size();
-        input_xyz->height = 1;
-        input_xyz->is_dense = true;
-        auto format_convert_end = std::chrono::high_resolution_clock::now();
-        float format_convert_time = std::chrono::duration<float, std::milli>(format_convert_end - format_convert_start).count();
+        // 分配GPU缓冲区并上传raw data
+        size_t raw_data_size = msg->data.size();
+        uint8_t* d_raw_data = nullptr;
+        cudaError_t err = cudaMalloc((void**)&d_raw_data, raw_data_size);
+        if (err != cudaSuccess)
+        {
+            ROS_ERROR("无法分配GPU内存: %s", cudaGetErrorString(err));
+            return;
+        }
+
+        // 异步上传raw data
+        err = cudaMemcpyAsync(
+            d_raw_data,
+            msg->data.data(),
+            raw_data_size,
+            cudaMemcpyHostToDevice,
+            unified_stream_
+        );
+        if (err != cudaSuccess)
+        {
+            ROS_ERROR("Raw data上传失败: %s", cudaGetErrorString(err));
+            cudaFree(d_raw_data);
+            return;
+        }
+
+        auto raw_upload_end = std::chrono::high_resolution_clock::now();
+        float raw_upload_time = std::chrono::duration<float, std::milli>(raw_upload_end - raw_upload_start).count();
 
         // 配置 GPU 预处理参数
         PreprocessConfig gpu_config;
@@ -353,17 +372,27 @@ private:
         gpu_config.statistical_stddev = static_cast<float>(outlier_std_dev_thresh_);
         gpu_config.compute_normals = false;  // 平面检测不需要法线
 
-        // 执行 GPU 预处理（数据已在 GPU 上）
+        // ========== 执行 GPU 预处理（Raw Data解析）==========
         auto gpu_preprocess_start = std::chrono::high_resolution_clock::now();
-        ProcessingResult gpu_result = gpu_preprocessor_->process(input_xyz, gpu_config);
+        ProcessingResult gpu_result = gpu_preprocessor_->processRawMsg(
+            d_raw_data,
+            num_points,
+            msg->point_step,
+            x_offset, y_offset, z_offset, intensity_offset,
+            x_datatype, y_datatype, z_datatype, intensity_datatype,
+            gpu_config
+        );
         auto gpu_preprocess_end = std::chrono::high_resolution_clock::now();
         float gpu_preprocess_time = std::chrono::duration<float, std::milli>(
             gpu_preprocess_end - gpu_preprocess_start).count();
 
-        // 输出 GPU 预处理性能统计
+        // 释放临时GPU缓冲区
+        cudaFree(d_raw_data);
+
+        // 获取 GPU 预处理性能统计（在整个函数中使用）
         const auto &gpu_stats = gpu_preprocessor_->getLastStats();
-        ROS_INFO("GPU preprocessing: %.2f ms (upload=%.2fms, voxel=%.2fms, outlier=%.2fms), output: %zu points", 
-                 gpu_preprocess_time, gpu_stats.upload_time_ms, gpu_stats.voxel_filter_time_ms,
+        ROS_INFO("GPU preprocessing: %.2f ms (raw_upload=%.2fms, unpack=%.2fms, voxel=%.2fms, outlier=%.2fms), output: %zu points", 
+                 gpu_preprocess_time, raw_upload_time, gpu_stats.upload_time_ms, gpu_stats.voxel_filter_time_ms,
                  gpu_stats.outlier_removal_time_ms, gpu_result.getPointCount());
 
         // ========== Step 2: 零拷贝指针传递 ==========
@@ -412,7 +441,7 @@ private:
         ROS_INFO("Quadric detection (zero-copy): %.2f ms", quadric_detect_time);
 
         // ========== Step 5: 安全同步与释放 ==========
-        cudaError_t err = cudaStreamSynchronize(unified_stream_);
+        err = cudaStreamSynchronize(unified_stream_);
         if (err != cudaSuccess)
         {
             ROS_ERROR("CUDA stream synchronization failed: %s", cudaGetErrorString(err));
@@ -498,10 +527,12 @@ private:
         float result_time = std::chrono::duration<float, std::milli>(result_end - result_start).count();
 
         // ========== 详细时间分解 ==========
+        float gpu_unpack_time = gpu_stats.upload_time_ms; // processRawMsg中使用upload_time_ms存储解包时间
+        
         std::cout << "----------------------------------------" << std::endl;
         std::cout << "  [详细时间分解]" << std::endl;
-        std::cout << "  - ROS消息转换: " << std::fixed << std::setprecision(2) << ros_convert_time << " ms" << std::endl;
-        std::cout << "  - 点云格式转换: " << std::fixed << std::setprecision(2) << format_convert_time << " ms" << std::endl;
+        std::cout << "  - GPU Raw数据上传: " << std::fixed << std::setprecision(2) << raw_upload_time << " ms" << std::endl;
+        std::cout << "  - GPU并行解包: " << std::fixed << std::setprecision(2) << gpu_unpack_time << " ms" << std::endl;
         std::cout << "  - GPU预处理: " << std::fixed << std::setprecision(2) << gpu_preprocess_time << " ms" << std::endl;
         std::cout << "  - 平面检测: " << std::fixed << std::setprecision(2) << plane_detect_time << " ms" << std::endl;
         std::cout << "  - 二次曲面检测: " << std::fixed << std::setprecision(2) << quadric_detect_time << " ms" << std::endl;
@@ -512,7 +543,7 @@ private:
         std::cout << "  - 二次曲面内点访问总时间: " << std::fixed << std::setprecision(2) << total_quadric_inlier_access_time << " ms" << std::endl;
         std::cout << "  - 二次曲面日志输出: " << std::fixed << std::setprecision(2) << quadric_log_time << " ms" << std::endl;
         std::cout << "  - 结果输出总时间: " << std::fixed << std::setprecision(2) << result_time << " ms" << std::endl;
-        float accounted_time = ros_convert_time + format_convert_time + gpu_preprocess_time + 
+        float accounted_time = raw_upload_time + gpu_unpack_time + gpu_preprocess_time + 
                                plane_detect_time + quadric_detect_time + result_time;
         float unaccounted_time = total_ms - accounted_time;
         std::cout << "  - 已统计时间: " << std::fixed << std::setprecision(2) << accounted_time << " ms" << std::endl;
