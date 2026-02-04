@@ -618,7 +618,7 @@ void QuadricDetect::validateInversePowerResults(int batch_size)
     }
 }
 
-// 🆕 新增函数：输出最优模型详情
+//  新增函数：输出最优模型详情
 void QuadricDetect::outputBestModelDetails(const GPUQuadricModel &best_model, int inlier_count, int model_idx, int iteration)
 {
     std::cout << "\n[QuadricDetect] ========== 第" << iteration << "次迭代最优模型详情 ==========" << std::endl;
