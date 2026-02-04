@@ -22,6 +22,7 @@ find_package(PCL 1.8 REQUIRED COMPONENTS
 )
 find_package(CUDA REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # 查找CUDA工具包路径
 find_path(CUDA_TOOLKIT_ROOT_DIR
@@ -105,12 +106,25 @@ target_link_libraries(quadric_detect_gpu_lib
   curand    # cuRAND for random number generation
 )
 
-target_link_libraries(gpu_preprocessor_lib
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  ${CUDA_LIBRARIES}
-  curand    # cuRAND for random number generation
-)
+# 添加 OpenMP 支持
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(gpu_preprocessor_lib
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+      ${CUDA_LIBRARIES}
+      curand    # cuRAND for random number generation
+      OpenMP::OpenMP_CXX
+    )
+    # 设置 OpenMP 编译标志
+    target_compile_options(gpu_preprocessor_lib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${OpenMP_CXX_FLAGS}>)
+else()
+    target_link_libraries(gpu_preprocessor_lib
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+      ${CUDA_LIBRARIES}
+      curand    # cuRAND for random number generation
+    )
+endif()
 
 # GPU检查节点 (🆕 更新为完整的GPU流水线测试)
 add_executable(gpu_check_node src/gpu_check.cpp)
@@ -132,7 +146,7 @@ target_link_libraries(SuperVoxel
   ${PCL_LIBRARIES}
 )
 
-# 🎯 demo_test ROS节点已禁用 - 代码保留在demo_test.cpp.disabled
+# 测试demo_test ROS节点 - 代码保留在demo_test.cpp.disabled
 # add_executable(demo_test src/demo_test.cpp)
 # target_link_libraries(demo_test
 #   quadric_detect_gpu_lib
