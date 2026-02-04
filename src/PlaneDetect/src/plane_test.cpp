@@ -411,14 +411,14 @@ private:
             return;
         }
 
-        // 全链路总计时结束
+        // 全链路总计时结束（在同步之后，确保所有 GPU 操作完成）
         auto total_end = std::chrono::high_resolution_clock::now();
         float total_ms = std::chrono::duration<float, std::milli>(total_end - total_start).count();
 
         // 释放外部显存缓冲区
         plane_detector_->releaseExternalBuffer();
 
-        // ========== Step 6: 结果合并与可视化 ==========
+        // ========== Step 6: 结果输出（仅日志，不计入处理时间）==========
         // 获取平面检测结果
         const auto &detected_planes = plane_detector_->getDetectedPrimitives();
         ROS_INFO("=== PLANE DETECTION RESULTS ===");
@@ -447,26 +447,6 @@ private:
                 const auto &quadric = detected_quadrics[i];
                 ROS_INFO("Quadric %zu: %zu inliers", i + 1, quadric.inliers->size());
             }
-        }
-
-        // 可视化平面（受开关控制）
-        if (enable_visualization_ && enable_plane_visualization_)
-        {
-            visualizePlanes(detected_planes, msg->header);
-        }
-
-        // 获取最终剩余点云（二次曲面检测后）
-        auto final_remaining_cloud = quadric_detector_->getFinalCloud();
-        ROS_INFO("Points remaining after quadric detection: %zu", final_remaining_cloud->size());
-
-        // 发布最终结果点云
-        if (!final_remaining_cloud->empty())
-        {
-            sensor_msgs::PointCloud2 result_msg;
-            pcl::toROSMsg(*final_remaining_cloud, result_msg);
-            result_msg.header = msg->header;
-            result_msg.header.frame_id = output_frame_;
-            result_cloud_pub_.publish(result_msg);
         }
 
         // ========== 全链路总耗时统计 ==========
