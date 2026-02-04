@@ -3,6 +3,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <cmath>
+#include <omp.h>
 
 // ========== 构造函数与析构函数 ==========
 GPUPreprocessor::GPUPreprocessor()
@@ -254,27 +255,29 @@ size_t GPUPreprocessor::convertPCLToGPU(const pcl::PointCloud<pcl::PointXYZ>::Pt
         return 0;
     }
 
-    size_t valid_count = 0;
-    size_t max_count = std::min(cpu_cloud->size(), max_points_capacity_);
-
-    for (size_t i = 0; i < cpu_cloud->size() && valid_count < max_count; ++i)
+    size_t total_points = cpu_cloud->size();
+    size_t max_count = std::min(total_points, max_points_capacity_);
+    
+    if (total_points == 0)
     {
-        const auto &pt = cpu_cloud->points[i];
-        // ✅ 添加有效性检查
-        if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
-        {
-            h_pinned_buffer_[valid_count].x = pt.x;
-            h_pinned_buffer_[valid_count].y = pt.y;
-            h_pinned_buffer_[valid_count].z = pt.z;
-            h_pinned_buffer_[valid_count].intensity = 0.0f;
-            valid_count++;
-        }
+        return 0;
     }
 
-    std::cout << "[GPUPreprocessor] Converted " << valid_count << " valid points (filtered "
-              << (cpu_cloud->size() - valid_count) << " invalid points)" << std::endl;
+    // 极速并行拷贝：直接将 PCL 点云数据拷贝到锁页内存缓冲区
+    // 无效点过滤由 GPU Kernel 处理，不在 CPU 端浪费时间
+    #pragma omp parallel for
+    for (size_t i = 0; i < max_count; ++i)
+    {
+        const auto &pt = cpu_cloud->points[i];
+        h_pinned_buffer_[i].x = pt.x;
+        h_pinned_buffer_[i].y = pt.y;
+        h_pinned_buffer_[i].z = pt.z;
+        h_pinned_buffer_[i].intensity = 0.0f;
+    }
 
-    return valid_count; // ✅ 返回转换的点数，数据已写入 h_pinned_buffer_
+    std::cout << "[GPUPreprocessor] Converted " << max_count << " points (invalid points will be filtered by GPU)" << std::endl;
+
+    return max_count; // 返回转换的点数，数据已写入 h_pinned_buffer_
 }
 
 // ========== Stream 管理接口实现 ==========
