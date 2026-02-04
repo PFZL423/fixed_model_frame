@@ -6,6 +6,11 @@
 #include <thrust/extrema.h>  // 必须包含，用于 max_element
 #include <thrust/device_ptr.h>
 #include <thrust/gather.h>   // 用于 gather 操作
+#include <thrust/remove.h>   // 用于 remove_if
+#include <thrust/distance.h> // 用于 distance
+#include <thrust/copy.h>     // 用于 copy_if
+#include <thrust/iterator/permutation_iterator.h> // 用于 make_permutation_iterator
+#include <thrust/functional.h> // 用于 identity
 #include <ctime>
 #include <iostream>
 #include <cmath>     // 添加这个头文件用于isfinite函数
@@ -21,7 +26,8 @@
 // 静态变量：保存初始化时的随机数状态地址
 static void* g_init_rand_states_addr = nullptr;
 
-__global__ void initCurandStates_Kernel(curandState *states, unsigned long seed, int n)
+__launch_bounds__(128)
+__global__ void initCurandStates_Kernel(curandState *states, unsigned long long seed, int n)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     // 强制打印 GPU 端的索引：如果控制台没动静，说明内核罢工了
@@ -30,6 +36,9 @@ __global__ void initCurandStates_Kernel(curandState *states, unsigned long seed,
     }
     if (idx < n)
     {
+        // 强制初始化：手动给 states[idx] 赋一个非零的占位值
+        states[idx] = curandState(); // 使用默认构造函数初始化
+        
         // 修正：使用 idx 作为 sequence 参数是 NVIDIA 官方推荐的确保 1024 个线程随机序列互不相关的标准做法
         curand_init(seed, idx, 0, &states[idx]);
     }
@@ -351,6 +360,40 @@ void QuadricDetect::initializeGPUMemory(int batch_size)
     d_batch_ATA_matrices_.resize(batch_size * 10 * 10);
     d_batch_R_matrices_.resize(batch_size * 10 * 10);
     d_batch_eigenvectors_.resize(batch_size * 10);
+    
+    // 预分配掩码缓冲区（使用原始总点数，确保掩码大小固定）
+    if (original_total_count_ > 0)
+    {
+        if (d_valid_mask_ == nullptr || original_total_count_ > max_points_capacity_)
+        {
+            // 释放旧缓冲区（如果存在）
+            if (d_valid_mask_ != nullptr)
+            {
+                cudaFree(d_valid_mask_);
+                d_valid_mask_ = nullptr;
+            }
+            
+            // 分配新的掩码缓冲区（使用原始总点数）
+            cudaError_t err = cudaMalloc((void**)&d_valid_mask_, original_total_count_ * sizeof(uint8_t));
+            if (err != cudaSuccess)
+            {
+                std::cerr << "[initializeGPUMemory] 错误：无法分配掩码缓冲区: " 
+                          << cudaGetErrorString(err) << std::endl;
+                d_valid_mask_ = nullptr;
+                max_points_capacity_ = 0;
+            }
+            else
+            {
+                max_points_capacity_ = original_total_count_;
+                if (params_.verbosity > 1)
+                {
+                    std::cout << "[initializeGPUMemory] 分配掩码缓冲区: " << original_total_count_ 
+                              << " 点 (" << (original_total_count_ * sizeof(uint8_t) / 1024.0 / 1024.0) 
+                              << " MB)" << std::endl;
+                }
+            }
+        }
+    }
 }
 
 void QuadricDetect::initializeRemainingIndices(size_t count)
@@ -384,11 +427,11 @@ void QuadricDetect::uploadPointsToGPU(const std::vector<GPUPoint3f> &h_points)
 
 void QuadricDetect::launchInitCurandStates(int batch_size)
 {
-    dim3 block(256);
+    dim3 block(128);  // 修改：从 256 改为 128，匹配 __launch_bounds__
     dim3 grid((batch_size * 10 + block.x - 1) / block.x);
 
     // 加入 clock() 增加随机性
-    unsigned long base_seed = (unsigned long)time(nullptr) ^ (unsigned long)clock();
+    unsigned long long base_seed = (unsigned long long)time(nullptr) ^ (unsigned long long)clock();
 
     // 检查显存地址：打印初始化时的地址
     g_init_rand_states_addr = thrust::raw_pointer_cast(d_rand_states_.data());
@@ -896,126 +939,173 @@ void QuadricDetect::getBestModelResults(thrust::host_vector<int> &h_best_index, 
     h_best_count = d_best_model_count_;
 }
 
-// remove的GPU函数实现
-// 在 QuadricDetect.cu 中添加内核
-__global__ void removePointsKernel(
-    const int *remaining_points,
-    int remaining_count,
-    const int *sorted_inliers, // 已排序的内点索引
+// 标记掩码内核 - 极速逻辑移除
+__global__ void markMaskKernel(
+    const int *inlier_indices,
     int inlier_count,
-    int *output_points,
-    int *output_count)
+    uint8_t *valid_mask,
+    int mask_size)  // 添加掩码大小参数，防止越界
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= remaining_count)
-        return;
-
-    int point_id = remaining_points[idx];
-
-    // GPU上二分查找
-    bool is_inlier = false;
-    int left = 0, right = inlier_count - 1;
-    while (left <= right)
-    {
-        int mid = (left + right) / 2;
-        if (sorted_inliers[mid] == point_id)
-        {
-            is_inlier = true;
-            break;
+    if (idx < inlier_count) {
+        int point_idx = inlier_indices[idx];
+        // 添加边界检查，防止越界访问
+        if (point_idx >= 0 && point_idx < mask_size) {
+            valid_mask[point_idx] = 0;  // 标记为已移除
         }
-        if (sorted_inliers[mid] < point_id)
-            left = mid + 1;
-        else
-            right = mid - 1;
-    }
-
-    // 如果不是内点，就保留
-    if (!is_inlier)
-    {
-        int write_pos = atomicAdd(output_count, 1);
-        output_points[write_pos] = point_id;
     }
 }
 
-// 包装函数
+// 掩码压缩实现 - 双缓冲压实方案（避免 remove_if 原地操作失效）
 void QuadricDetect::launchRemovePointsKernel()
 {
-    // 修复：添加边界检查，防止 radix_sort 错误
-    if (current_inlier_count_ <= 0)
+    // 边界检查
+    if (current_inlier_count_ <= 0 || current_inlier_count_ > static_cast<int>(d_temp_inlier_indices_.size()))
     {
         if (params_.verbosity > 0)
         {
-            std::cout << "[launchRemovePointsKernel] 跳过：内点数量为0" << std::endl;
+            std::cout << "[launchRemovePointsKernel] 跳过：内点数量无效" << std::endl;
         }
         return;
     }
     
-    if (current_inlier_count_ > static_cast<int>(d_temp_inlier_indices_.size()))
+    if (d_valid_mask_ == nullptr)
     {
-        std::cerr << "[launchRemovePointsKernel] 错误：内点数量 (" << current_inlier_count_
-                  << ") 超出数组大小 (" << d_temp_inlier_indices_.size() << ")" << std::endl;
+        std::cerr << "[launchRemovePointsKernel] 错误：掩码缓冲区未初始化" << std::endl;
         return;
     }
     
-    if (d_temp_inlier_indices_.empty())
-    {
-        std::cerr << "[launchRemovePointsKernel] 错误：内点索引数组为空" << std::endl;
-        return;
-    }
+    // Step 0: 确保上一轮的掩码重置已完成（关键！）
+    cudaStreamSynchronize(stream_);
     
-    // 确保之前的 CUDA 操作已完成
-    cudaError_t sync_error = cudaStreamSynchronize(stream_);
-    if (sync_error != cudaSuccess)
-    {
-        std::cerr << "[launchRemovePointsKernel] CUDA流同步错误: " 
-                  << cudaGetErrorString(sync_error) << std::endl;
-        return;
-    }
-    
-    // 1. 对内点索引排序（纯GPU操作）
-    try {
-        thrust::sort(d_temp_inlier_indices_.begin(),
-                     d_temp_inlier_indices_.begin() + current_inlier_count_);
-        
-        // 检查排序操作是否有错误
-        cudaError_t sort_error = cudaGetLastError();
-        if (sort_error != cudaSuccess)
-        {
-            std::cerr << "[launchRemovePointsKernel] 排序错误: " 
-                      << cudaGetErrorString(sort_error) << std::endl;
-            return;
-        }
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "[launchRemovePointsKernel] 排序异常: " << e.what() << std::endl;
-        return;
-    }
-
-    // 2. 分配输出空间
-    thrust::device_vector<int> d_new_remaining(d_remaining_indices_.size());
-    thrust::device_vector<int> d_output_count(1, 0);
-
-    // 3. 启动内核
+    // Step 1: 标记内点为0
     dim3 block(256);
-    dim3 grid((d_remaining_indices_.size() + block.x - 1) / block.x);
-
-    removePointsKernel<<<grid, block, 0, stream_>>>(
-        thrust::raw_pointer_cast(d_remaining_indices_.data()),
-        static_cast<int>(d_remaining_indices_.size()),
+    dim3 grid((current_inlier_count_ + block.x - 1) / block.x);
+    
+    // 添加边界检查：确保掩码大小有效
+    if (original_total_count_ == 0)
+    {
+        std::cerr << "[launchRemovePointsKernel] 错误：original_total_count_ 为0，无法标记掩码" << std::endl;
+        return;
+    }
+    
+    // 调试：打印一些内点索引，检查是否在范围内
+    if (params_.verbosity > 1 && current_inlier_count_ > 0)
+    {
+        thrust::host_vector<int> h_check_indices(std::min(3, current_inlier_count_));
+        thrust::copy_n(d_temp_inlier_indices_.begin(), h_check_indices.size(), h_check_indices.begin());
+        std::cout << "[launchRemovePointsKernel] 准备标记 " << current_inlier_count_ 
+                  << " 个内点，掩码大小=" << original_total_count_ << std::endl;
+        std::cout << "  前3个内点索引: ";
+        for (size_t i = 0; i < h_check_indices.size(); ++i)
+        {
+            std::cout << h_check_indices[i];
+            if (h_check_indices[i] >= static_cast<int>(original_total_count_))
+            {
+                std::cout << "(越界！)";
+            }
+            std::cout << " ";
+        }
+        std::cout << std::endl;
+    }
+    
+    markMaskKernel<<<grid, block, 0, stream_>>>(
         thrust::raw_pointer_cast(d_temp_inlier_indices_.data()),
         current_inlier_count_,
-        thrust::raw_pointer_cast(d_new_remaining.data()),
-        thrust::raw_pointer_cast(d_output_count.data()));
-
+        d_valid_mask_,
+        static_cast<int>(original_total_count_));  // 传入掩码大小
+    
+    // Step 1.5: 关键同步点 - 确保标记完成后再进行压实
     cudaStreamSynchronize(stream_);
-
-    // 4. 获取实际输出大小并调整
-    thrust::host_vector<int> h_count = d_output_count;
-    int new_size = h_count[0]; //  这里有一次小传输，但unavoidable
-
-    d_new_remaining.resize(new_size);
-    d_remaining_indices_ = std::move(d_new_remaining);
+    
+    // 检查内核执行错误
+    cudaError_t mark_err = cudaGetLastError();
+    if (mark_err != cudaSuccess)
+    {
+        std::cerr << "[launchRemovePointsKernel] markMaskKernel 错误: " 
+                  << cudaGetErrorString(mark_err) << std::endl;
+        return;
+    }
+    
+    // 验证标记是否成功（调试用）
+    if (params_.verbosity > 1 && current_inlier_count_ > 0)
+    {
+        // 检查前几个内点索引的掩码值
+        thrust::host_vector<int> h_sample_inliers(std::min(5, current_inlier_count_));
+        thrust::copy_n(d_temp_inlier_indices_.begin(), h_sample_inliers.size(), h_sample_inliers.begin());
+        
+        thrust::host_vector<uint8_t> h_sample_mask(h_sample_inliers.size());
+        for (size_t i = 0; i < h_sample_inliers.size(); ++i)
+        {
+            int idx = h_sample_inliers[i];
+            if (idx >= 0 && idx < static_cast<int>(original_total_count_))
+            {
+                cudaMemcpy(&h_sample_mask[i], &d_valid_mask_[idx], sizeof(uint8_t), cudaMemcpyDeviceToHost);
+            }
+            else
+            {
+                h_sample_mask[i] = 255;  // 标记为越界
+            }
+        }
+        
+        std::cout << "[launchRemovePointsKernel] 标记验证（前" << h_sample_inliers.size() << "个内点，掩码大小=" << original_total_count_ << "）:" << std::endl;
+        for (size_t i = 0; i < h_sample_inliers.size(); ++i)
+        {
+            std::cout << "  索引 " << h_sample_inliers[i] << " 的掩码值: " << static_cast<int>(h_sample_mask[i]);
+            if (h_sample_inliers[i] >= static_cast<int>(original_total_count_))
+            {
+                std::cout << " (越界！)";
+            }
+            std::cout << std::endl;
+        }
+    }
+    
+    // Step 2: 双缓冲压实 - 创建临时桶
+    thrust::device_vector<int> d_next_remaining(d_remaining_indices_.size());
+    
+    // Step 3: 使用 Stencil 版本的 copy_if 进行压实
+    // Input: d_remaining_indices_
+    // Stencil: 使用 valid_mask 作为判定标准（通过 permutation_iterator 按索引取掩码）
+    // Output: 写入 d_next_remaining
+    // Predicate: 只有掩码为 1（有效点）才拷贝
+    thrust::device_ptr<uint8_t> mask_ptr = thrust::device_pointer_cast(d_valid_mask_);
+    
+    auto new_end = thrust::copy_if(
+        thrust::cuda::par.on(stream_),
+        d_remaining_indices_.begin(), 
+        d_remaining_indices_.end(),
+        thrust::make_permutation_iterator(mask_ptr, d_remaining_indices_.begin()), // 关键：按索引取掩码
+        d_next_remaining.begin(),
+        [] __device__ (uint8_t mask_val) { return mask_val == 1; }); // 只有掩码为 1 的才留下
+    
+    // Step 4: 关键同步点 - 确保压实完成
+    cudaStreamSynchronize(stream_);
+    
+    // Step 5: 错误检查
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[launchRemovePointsKernel] CUDA 错误: " 
+                  << cudaGetErrorString(err) << std::endl;
+        return;
+    }
+    
+    // Step 6: 计算新大小并交换
+    size_t new_size = thrust::distance(d_next_remaining.begin(), new_end);
+    d_remaining_indices_.swap(d_next_remaining);
+    d_remaining_indices_.resize(new_size);
+    
+    // Step 7: 重置掩码为1（为下一轮准备）
+    // 使用原始总点数确保全量覆盖
+    if (original_total_count_ > 0)
+    {
+        cudaMemsetAsync(d_valid_mask_, 1, original_total_count_ * sizeof(uint8_t), stream_);
+    }
+    
+    if (params_.verbosity > 0)
+    {
+        std::cout << "[launchRemovePointsKernel] 压缩完成，剩余点数: " << new_size << std::endl;
+    }
 }
 
 // 新增函数实现--反幂迭代的核心实现

@@ -18,6 +18,9 @@ QuadricDetect::QuadricDetect(const DetectorParams &params) : params_(params)
     owns_stream_ = true;
     is_external_memory_ = false;
     d_external_points_ = nullptr;
+    d_valid_mask_ = nullptr;
+    max_points_capacity_ = 0;
+    original_total_count_ = 0;
     cusolver_handle_ = nullptr;
 }
 
@@ -30,6 +33,11 @@ QuadricDetect::~QuadricDetect()
     if (cusolver_handle_ != nullptr)
     {
         cusolverDnDestroy(cusolver_handle_);
+    }
+    if (d_valid_mask_ != nullptr)
+    {
+        cudaFree(d_valid_mask_);
+        d_valid_mask_ = nullptr;
     }
 }
 
@@ -139,9 +147,16 @@ void QuadricDetect::findQuadrics_BatchGPU()
     const int batch_size = 1024;
     const int max_iterations = 3;  // 降低主循环迭代次数，避免剩余点数少时空转
 
-    // Step 1: 初始化GPU内存
+    // Step 1: 初始化GPU内存（仅在需要时）
     auto init_start = std::chrono::high_resolution_clock::now();
-    initializeGPUMemory(batch_size);
+    
+    // 检查是否已经初始化（通过检查 d_batch_models_ 的大小）
+    bool needs_init = (d_batch_models_.size() != static_cast<size_t>(batch_size));
+    if (needs_init)
+    {
+        initializeGPUMemory(batch_size);
+    }
+    
     launchInitCurandStates(batch_size);
     auto init_end = std::chrono::high_resolution_clock::now();
     float init_time = std::chrono::duration<float, std::milli>(init_end - init_start).count();
@@ -611,9 +626,19 @@ bool QuadricDetect::processCloudDirect(GPUPoint3f* d_points, size_t count)
     // 零拷贝指针赋值
     d_external_points_ = d_points;
     is_external_memory_ = true;
+    
+    // 记录初始总点数（用于掩码缓冲区分配）
+    original_total_count_ = count;
 
     // 初始化 d_remaining_indices_ 为 0..count-1（假设输入就是剩余点，已压实）
     initializeRemainingIndices(count);
+
+    // 确保掩码缓冲区已分配并初始化为全1
+    initializeGPUMemory(1024);  // batch_size=1024
+    if (d_valid_mask_ != nullptr)
+    {
+        cudaMemsetAsync(d_valid_mask_, 1, count * sizeof(uint8_t), stream_);
+    }
 
     // 执行二次曲面检测
     auto detect_start = std::chrono::high_resolution_clock::now();
@@ -629,6 +654,9 @@ bool QuadricDetect::processCloudDirect(GPUPoint3f* d_points, size_t count)
         std::cout << "  Quadric detection: " << detect_time << " ms" << std::endl;
         std::cout << "  Total: " << total_time << " ms" << std::endl;
     }
+
+    // 确保所有 GPU 操作完成
+    cudaStreamSynchronize(stream_);
 
     // 注意：不重置外部内存标志，保持 is_external_memory_ 和 d_external_points_
     // 以便后续 getFinalCloud() 和 extractInlierCloud() 能正确识别零拷贝模式

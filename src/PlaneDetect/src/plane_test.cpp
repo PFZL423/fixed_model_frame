@@ -14,6 +14,8 @@
 #include <Eigen/Dense>
 #include <omp.h>
 #include <limits>
+#include <iostream>
+#include <iomanip>
 
 #include "PlaneDetect/PlaneDetect.h"
 #include "super_voxel/supervoxel.h"
@@ -287,9 +289,12 @@ private:
         
         ROS_INFO("Received point cloud with %d points", msg->width * msg->height);
 
-        // 转换为PCL格式
+        // ========== 计时：ROS消息转换 ==========
+        auto ros_convert_start = std::chrono::high_resolution_clock::now();
         pcl::PointCloud<pcl::PointXYZI>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZI>);
         pcl::fromROSMsg(*msg, *input_cloud);
+        auto ros_convert_end = std::chrono::high_resolution_clock::now();
+        float ros_convert_time = std::chrono::duration<float, std::milli>(ros_convert_end - ros_convert_start).count();
 
         if (input_cloud->empty())
         {
@@ -297,6 +302,8 @@ private:
             return;
         }
 
+        // ========== 计时：点云格式转换 ==========
+        auto format_convert_start = std::chrono::high_resolution_clock::now();
         // ========== Step 1: GPU 预处理（体素下采样 + 离群点移除）==========
         // 转换为 PointXYZ（GPUPreprocessor 当前只支持 PointXYZ）
         // 使用 OpenMP 并行化点云转换，提升性能
@@ -333,6 +340,8 @@ private:
         input_xyz->width = input_xyz->size();
         input_xyz->height = 1;
         input_xyz->is_dense = true;
+        auto format_convert_end = std::chrono::high_resolution_clock::now();
+        float format_convert_time = std::chrono::duration<float, std::milli>(format_convert_end - format_convert_start).count();
 
         // 配置 GPU 预处理参数
         PreprocessConfig gpu_config;
@@ -418,13 +427,21 @@ private:
         // 释放外部显存缓冲区
         plane_detector_->releaseExternalBuffer();
 
-        // ========== Step 6: 结果输出（仅日志，不计入处理时间）==========
+        // ========== Step 6: 结果输出（详细计时）==========
+        auto result_start = std::chrono::high_resolution_clock::now();
+        
         // 获取平面检测结果
+        auto get_planes_start = std::chrono::high_resolution_clock::now();
         const auto &detected_planes = plane_detector_->getDetectedPrimitives();
+        auto get_planes_end = std::chrono::high_resolution_clock::now();
+        float get_planes_time = std::chrono::duration<float, std::milli>(get_planes_end - get_planes_start).count();
+        
         ROS_INFO("=== PLANE DETECTION RESULTS ===");
         ROS_INFO("Number of planes detected: %zu", detected_planes.size());
 
-        // 输出每个平面的参数
+        // 输出每个平面的参数（访问 inliers->size() 可能触发数据传输）
+        auto plane_log_start = std::chrono::high_resolution_clock::now();
+        float total_plane_inlier_access_time = 0.0f;
         for (size_t i = 0; i < detected_planes.size(); ++i)
         {
             const auto &plane = detected_planes[i];
@@ -432,27 +449,76 @@ private:
             ROS_INFO("  Equation: %.4fx + %.4fy + %.4fz + %.4f = 0",
                      plane.model_coefficients[0], plane.model_coefficients[1],
                      plane.model_coefficients[2], plane.model_coefficients[3]);
-            ROS_INFO("  Inliers: %zu points", plane.inliers->size());
+            auto inlier_access_start = std::chrono::high_resolution_clock::now();
+            size_t inlier_count = plane.inliers->size();
+            auto inlier_access_end = std::chrono::high_resolution_clock::now();
+            float inlier_access_time = std::chrono::duration<float, std::milli>(inlier_access_end - inlier_access_start).count();
+            total_plane_inlier_access_time += inlier_access_time;
+            ROS_INFO("  Inliers: %zu points", inlier_count);
+            if (inlier_access_time > 1.0f) {
+                ROS_INFO("    [WARNING] 访问内点数据耗时: %.2f ms (可能触发GPU->CPU传输)", inlier_access_time);
+            }
         }
+        auto plane_log_end = std::chrono::high_resolution_clock::now();
+        float plane_log_time = std::chrono::duration<float, std::milli>(plane_log_end - plane_log_start).count();
 
         // 获取二次曲面检测结果
+        float get_quadrics_time = 0.0f;
+        float quadric_log_time = 0.0f;
+        float total_quadric_inlier_access_time = 0.0f;
         if (quadric_success)
         {
+            auto get_quadrics_start = std::chrono::high_resolution_clock::now();
             const auto &detected_quadrics = quadric_detector_->getDetectedPrimitives();
+            auto get_quadrics_end = std::chrono::high_resolution_clock::now();
+            get_quadrics_time = std::chrono::duration<float, std::milli>(get_quadrics_end - get_quadrics_start).count();
+            
             ROS_INFO("=== QUADRIC DETECTION RESULTS ===");
             ROS_INFO("Number of quadrics detected: %zu", detected_quadrics.size());
 
+            auto quadric_log_start = std::chrono::high_resolution_clock::now();
             for (size_t i = 0; i < detected_quadrics.size(); ++i)
             {
                 const auto &quadric = detected_quadrics[i];
-                ROS_INFO("Quadric %zu: %zu inliers", i + 1, quadric.inliers->size());
+                auto quadric_inlier_start = std::chrono::high_resolution_clock::now();
+                size_t inlier_count = quadric.inliers->size();
+                auto quadric_inlier_end = std::chrono::high_resolution_clock::now();
+                float quadric_inlier_time = std::chrono::duration<float, std::milli>(quadric_inlier_end - quadric_inlier_start).count();
+                total_quadric_inlier_access_time += quadric_inlier_time;
+                ROS_INFO("Quadric %zu: %zu inliers", i + 1, inlier_count);
+                if (quadric_inlier_time > 1.0f) {
+                    ROS_INFO("    [WARNING] 访问内点数据耗时: %.2f ms (可能触发GPU->CPU传输)", quadric_inlier_time);
+                }
             }
+            auto quadric_log_end = std::chrono::high_resolution_clock::now();
+            quadric_log_time = std::chrono::duration<float, std::milli>(quadric_log_end - quadric_log_start).count();
         }
+        
+        auto result_end = std::chrono::high_resolution_clock::now();
+        float result_time = std::chrono::duration<float, std::milli>(result_end - result_start).count();
 
-        // ========== 全链路总耗时统计 ==========
-        ROS_INFO("----------------------------------------");
-        ROS_INFO("  [ALL-IN-ONE] TOTAL LATENCY: %.2f ms", total_ms);
-        ROS_INFO("----------------------------------------");
+        // ========== 详细时间分解 ==========
+        std::cout << "----------------------------------------" << std::endl;
+        std::cout << "  [详细时间分解]" << std::endl;
+        std::cout << "  - ROS消息转换: " << std::fixed << std::setprecision(2) << ros_convert_time << " ms" << std::endl;
+        std::cout << "  - 点云格式转换: " << std::fixed << std::setprecision(2) << format_convert_time << " ms" << std::endl;
+        std::cout << "  - GPU预处理: " << std::fixed << std::setprecision(2) << gpu_preprocess_time << " ms" << std::endl;
+        std::cout << "  - 平面检测: " << std::fixed << std::setprecision(2) << plane_detect_time << " ms" << std::endl;
+        std::cout << "  - 二次曲面检测: " << std::fixed << std::setprecision(2) << quadric_detect_time << " ms" << std::endl;
+        std::cout << "  - 获取平面结果: " << std::fixed << std::setprecision(2) << get_planes_time << " ms" << std::endl;
+        std::cout << "  - 平面内点访问总时间: " << std::fixed << std::setprecision(2) << total_plane_inlier_access_time << " ms" << std::endl;
+        std::cout << "  - 平面日志输出: " << std::fixed << std::setprecision(2) << plane_log_time << " ms" << std::endl;
+        std::cout << "  - 获取二次曲面结果: " << std::fixed << std::setprecision(2) << get_quadrics_time << " ms" << std::endl;
+        std::cout << "  - 二次曲面内点访问总时间: " << std::fixed << std::setprecision(2) << total_quadric_inlier_access_time << " ms" << std::endl;
+        std::cout << "  - 二次曲面日志输出: " << std::fixed << std::setprecision(2) << quadric_log_time << " ms" << std::endl;
+        std::cout << "  - 结果输出总时间: " << std::fixed << std::setprecision(2) << result_time << " ms" << std::endl;
+        float accounted_time = ros_convert_time + format_convert_time + gpu_preprocess_time + 
+                               plane_detect_time + quadric_detect_time + result_time;
+        float unaccounted_time = total_ms - accounted_time;
+        std::cout << "  - 已统计时间: " << std::fixed << std::setprecision(2) << accounted_time << " ms" << std::endl;
+        std::cout << "  - 未统计时间: " << std::fixed << std::setprecision(2) << unaccounted_time << " ms" << std::endl;
+        std::cout << "  [全链路总耗时] TOTAL LATENCY: " << std::fixed << std::setprecision(2) << total_ms << " ms" << std::endl;
+        std::cout << "----------------------------------------" << std::endl;
     }
 
     void visualizePlanes(const std::vector<DetectedPrimitive<pcl::PointXYZI>> &planes,

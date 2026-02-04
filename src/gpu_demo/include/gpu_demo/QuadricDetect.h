@@ -246,6 +246,9 @@ private:
     bool owns_stream_;                                      ///< 是否拥有流的生命周期
     bool is_external_memory_;                              ///< 标记是否使用外部显存（零拷贝模式）
     GPUPoint3f* d_external_points_;                        ///< 外部GPU点云指针（零拷贝模式）
+    uint8_t* d_valid_mask_;                                ///< 掩码缓冲区，标记点是否有效（1=有效，0=已移除）
+    size_t max_points_capacity_;                           ///< 掩码缓冲区最大容量
+    size_t original_total_count_;                          ///< 初始总点数（用于掩码缓冲区分配）
 
     // ========================================
     // 数据转换层 (PCL ↔ GPU格式)
