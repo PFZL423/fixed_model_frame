@@ -36,7 +36,7 @@ min_plane_inlier_count_absolute: 40000 # 有效模型的最小内点数(绝对�
 plane_max_iterations: 100 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
 batch_size: 512 # GPU批处理大小
-verbosity: 0 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
 
 # 两阶段RANSAC竞速参数
 ransac_coarse_ratio: 0.02 # 粗筛采样率（2%，stride=50）
@@ -62,7 +62,7 @@ quadric_distance_threshold: 0.15 # 二次曲面内点距离阈值 (m)
 min_quadric_inlier_count_absolute: 3000 # 有效模型的最小内点数(绝对值)
 quadric_max_iterations: 300 # RANSAC最大迭代次数（降低负载）
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
-quadric_verbosity: 0 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+quadric_verbosity: 2 # 详细输出级别 (0=静默, 1=正常, 2=详细)
 
 # Supervoxel算法参数
 sv_voxel_resolution: 0.2 # 体素分辨率 (m)

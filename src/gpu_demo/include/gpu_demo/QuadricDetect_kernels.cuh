@@ -43,25 +43,52 @@ __global__ void sampleAndBuildMatrices_Kernel(
     float *batch_matrices);
 
 /**
- * @brief 批量内点计数内核 - 2D并行验证
+ * @brief 批量内点计数内核 - 2D并行验证（粗筛阶段，支持子采样）
  * 使用2D Grid架构：blockIdx.y对应模型ID，blockIdx.x×threadIdx.x对应点ID
  * 每个block内使用shared memory reduce提高效率
  * @param all_points 所有点云数据 (GPU)
  * @param remaining_indices 剩余点索引 (GPU)
  * @param num_remaining 剩余点数量
+ * @param valid_mask 有效性掩码（1=有效，0=已移除）
  * @param batch_models 批量二次曲面模型 (GPU)
  * @param batch_size 模型数量
  * @param threshold 内点距离阈值
+ * @param stride 采样步长（1=全量，50=2%采样）
  * @param batch_inlier_counts [out] 每个模型的内点计数
  */
 __global__ void countInliersBatch_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,
     const GPUQuadricModel *batch_models,
     int batch_size,
     float threshold,
+    int stride,
     int *batch_inlier_counts);
+
+/**
+ * @brief 精选阶段内点计数内核 - 对Top-K模型全量计数
+ * @param all_points 所有点云数据 (GPU)
+ * @param remaining_indices 剩余点索引 (GPU)
+ * @param num_remaining 剩余点数量
+ * @param valid_mask 有效性掩码
+ * @param candidate_models 候选模型数组 (GPU)
+ * @param candidate_indices 候选模型在原始batch中的索引
+ * @param k 候选模型数量
+ * @param threshold 内点距离阈值
+ * @param fine_inlier_counts [out] 每个候选模型的内点计数
+ */
+__global__ void fineCountInliers_Kernel(
+    const GPUPoint3f *all_points,
+    const int *remaining_indices,
+    int num_remaining,
+    const uint8_t *valid_mask,
+    const GPUQuadricModel *candidate_models,
+    const int *candidate_indices,
+    int k,
+    float threshold,
+    int *fine_inlier_counts);
 
 /**
  * @brief 最优模型查找内核

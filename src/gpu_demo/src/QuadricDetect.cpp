@@ -178,6 +178,9 @@ void QuadricDetect::findQuadrics_BatchGPU()
     float total_sampling_time = 0.0f;
     float total_inverse_power_time = 0.0f;
     float total_inlier_count_time = 0.0f;
+    float total_coarse_time = 0.0f;
+    float total_topk_time = 0.0f;
+    float total_fine_time = 0.0f;
     float total_best_model_time = 0.0f;
     float total_extract_inliers_time = 0.0f;
     float total_extract_cloud_time = 0.0f;
@@ -204,12 +207,30 @@ void QuadricDetect::findQuadrics_BatchGPU()
         float inverse_power_time = std::chrono::duration<float, std::milli>(inverse_power_end - inverse_power_start).count();
         total_inverse_power_time += inverse_power_time;
 
-        // Step 4: 计算内点数
+        // Step 4: 两阶段RANSAC竞速
+        // 4.1 粗筛阶段：对batch_size个模型进行子采样计数（2%采样率）
         auto inlier_count_start = std::chrono::high_resolution_clock::now();
-        launchCountInliersBatch(batch_size);
-        auto inlier_count_end = std::chrono::high_resolution_clock::now();
-        float inlier_count_time = std::chrono::duration<float, std::milli>(inlier_count_end - inlier_count_start).count();
+        const int coarse_stride = 50;  // 2%采样率
+        launchCountInliersBatch(batch_size, coarse_stride);  // 粗筛，得到coarse_score
+        auto coarse_end = std::chrono::high_resolution_clock::now();
+        float coarse_time = std::chrono::duration<float, std::milli>(coarse_end - inlier_count_start).count();
+
+        // 4.2 Top-K选择：选出coarse_score最高的k个模型索引
+        const int fine_k = 20;  // 精选阶段候选数量（可从params_读取）
+        launchSelectTopKModels(fine_k);
+        auto topk_end = std::chrono::high_resolution_clock::now();
+        float topk_time = std::chrono::duration<float, std::milli>(topk_end - coarse_end).count();
+
+        // 4.3 精选阶段：对前k个模型进行全量计数
+        launchFineCountInliersBatch(fine_k);  // 精选，得到fine_score
+        auto fine_end = std::chrono::high_resolution_clock::now();
+        float fine_time = std::chrono::duration<float, std::milli>(fine_end - topk_end).count();
+
+        float inlier_count_time = coarse_time + topk_time + fine_time;
         total_inlier_count_time += inlier_count_time;
+        total_coarse_time += coarse_time;
+        total_topk_time += topk_time;
+        total_fine_time += fine_time;
 
         // 调试信息：计算并打印前几个模型的距离统计
         if (params_.verbosity > 1)
@@ -285,46 +306,45 @@ void QuadricDetect::findQuadrics_BatchGPU()
             }
         }
 
-        // Step 5: 找最优模型
+        // Step 5: 从精选结果中找最优模型
         auto best_model_start = std::chrono::high_resolution_clock::now();
-        launchFindBestModel(batch_size);
-        // 关键同步点：确保 GPU 完成最优模型查找后，CPU 才能读取结果
-        cudaStreamSynchronize(stream_);
+        // 从d_fine_inlier_counts_中找出最大值及其索引
+        thrust::host_vector<int> h_fine_counts(fine_k);
+        thrust::copy_n(d_fine_inlier_counts_.begin(), fine_k, h_fine_counts.begin());
+
+        int best_fine_count = 0;
+        int best_fine_idx = -1;
+        for (int i = 0; i < fine_k; ++i)
+        {
+            if (h_fine_counts[i] > best_fine_count)
+            {
+                best_fine_count = h_fine_counts[i];
+                best_fine_idx = i;
+            }
+        }
+
+        // 获取最优模型在原始batch中的索引
+        thrust::host_vector<int> h_top_k_indices(fine_k);
+        thrust::copy_n(d_top_k_indices_.begin(), fine_k, h_top_k_indices.begin());
+        int best_model_idx = (best_fine_idx >= 0) ? h_top_k_indices[best_fine_idx] : -1;
+        int best_count = best_fine_count;
+
         auto best_model_end = std::chrono::high_resolution_clock::now();
         float best_model_time = std::chrono::duration<float, std::milli>(best_model_end - best_model_start).count();
         total_best_model_time += best_model_time;
-
-        // 获取最优结果
-        thrust::host_vector<int> h_best_index(1);
-        thrust::host_vector<int> h_best_count(1);
-        getBestModelResults(h_best_index, h_best_count);
-
-        int best_count = h_best_count[0];
-        int best_model_idx = h_best_index[0];
         
         // 调试信息：验证最优模型结果
         if (params_.verbosity > 1)
         {
             std::cout << "[QuadricDetect] 最优模型选择结果:" << std::endl;
-            std::cout << "  最优模型索引: " << best_model_idx << std::endl;
+            std::cout << "  最优候选索引: " << best_fine_idx << std:: endl;
+            std::cout << "  最优模型索引（原始batch）: " << best_model_idx << std::endl;
             std::cout << "  最优模型内点数: " << best_count << std::endl;
             
             // 验证索引有效性
             if (best_model_idx < 0 || best_model_idx >= batch_size)
             {
                 std::cerr << "[QuadricDetect] 警告：最优模型索引无效！" << std::endl;
-            }
-            
-            // 验证内点计数是否与直接读取的值一致
-            if (best_model_idx >= 0 && best_model_idx < batch_size)
-            {
-                thrust::host_vector<int> h_all_counts = d_batch_inlier_counts_;
-                int direct_count = h_all_counts[best_model_idx];
-                std::cout << "  直接读取的内点数（验证）: " << direct_count << std::endl;
-                if (best_count != direct_count)
-                {
-                    std::cerr << "[QuadricDetect] 警告：最优模型内点数不一致！" << std::endl;
-                }
             }
         }
 
@@ -346,10 +366,10 @@ void QuadricDetect::findQuadrics_BatchGPU()
             break;
         }
 
-        // Step 6: 获取最优模型
-        thrust::host_vector<GPUQuadricModel> h_best_model(1);
-        thrust::copy_n(d_batch_models_.begin() + best_model_idx, 1, h_best_model.begin());
-        GPUQuadricModel best_gpu_model = h_best_model[0];
+        // Step 6: 获取最优模型（从候选模型中获取）
+        thrust::host_vector<GPUQuadricModel> h_candidate_models(fine_k);
+        thrust::copy_n(d_candidate_models_.begin(), fine_k, h_candidate_models.begin());
+        GPUQuadricModel best_gpu_model = h_candidate_models[best_fine_idx];
 
         // 添加：输出最优模型详情
         if (params_.verbosity > 0)
@@ -395,6 +415,9 @@ void QuadricDetect::findQuadrics_BatchGPU()
             std::cout << "  - 采样和构建矩阵: " << sampling_time << " ms" << std::endl;
             std::cout << "  - 反幂迭代: " << inverse_power_time << " ms" << std::endl;
             std::cout << "  - 计算内点数: " << inlier_count_time << " ms" << std::endl;
+            std::cout << "    - 粗筛阶段: " << coarse_time << " ms" << std::endl;
+            std::cout << "    - Top-K选择: " << topk_time << " ms" << std::endl;
+            std::cout << "    - 精选阶段: " << fine_time << " ms" << std::endl;
             std::cout << "  - 找最优模型: " << best_model_time << " ms" << std::endl;
             std::cout << "  - 提取内点索引: " << extract_inliers_time << " ms" << std::endl;
             std::cout << "  - 构建内点点云: " << extract_cloud_time << " ms" << std::endl;
@@ -418,6 +441,9 @@ void QuadricDetect::findQuadrics_BatchGPU()
         std::cout << "  - 采样和构建矩阵: " << total_sampling_time << " ms" << std::endl;
         std::cout << "  - 反幂迭代: " << total_inverse_power_time << " ms" << std::endl;
         std::cout << "  - 计算内点数: " << total_inlier_count_time << " ms" << std::endl;
+        std::cout << "    - 粗筛阶段: " << total_coarse_time << " ms" << std::endl;
+        std::cout << "    - Top-K选择: " << total_topk_time << " ms" << std::endl;
+        std::cout << "    - 精选阶段: " << total_fine_time << " ms" << std::endl;
         std::cout << "  - 找最优模型: " << total_best_model_time << " ms" << std::endl;
         std::cout << "  - 提取内点索引: " << total_extract_inliers_time << " ms" << std::endl;
         std::cout << "  - 构建内点点云: " << total_extract_cloud_time << " ms" << std::endl;

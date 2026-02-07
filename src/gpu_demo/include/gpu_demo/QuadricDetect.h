@@ -238,6 +238,12 @@ private:
     thrust::device_vector<float> d_batch_R_matrices_;   // 1024个10×10的R矩阵(QR分解)
     thrust::device_vector<float> d_batch_eigenvectors_; // 1024个10维特征向量
 
+    // 两阶段RANSAC竞速相关（参考平面检测）
+    thrust::device_vector<int> d_indices_full_;       ///< 完整索引序列（用于排序，预分配batch_size）
+    thrust::device_vector<int> d_top_k_indices_;      ///< Top-K模型索引（用于精选，预分配128）
+    thrust::device_vector<int> d_fine_inlier_counts_; ///< 精选阶段内点计数（预分配128）
+    thrust::device_vector<GPUQuadricModel> d_candidate_models_; ///< 候选模型数组（预分配128）
+
     // ========================================
     // CUDA计算资源
     // ========================================
@@ -337,11 +343,26 @@ private:
     void launchSampleAndBuildMatrices(int batch_size);
     
     /**
-     * @brief 启动批量内点计数内核
+     * @brief 启动批量内点计数内核（粗筛阶段）
      * 使用2D Grid架构：Y维度对应模型，X维度对应点云
      * @param batch_size 需要验证的模型数量
+     * @param stride 采样步长（1=全量，50=2%采样）
     */
-    void launchCountInliersBatch(int batch_size);
+    void launchCountInliersBatch(int batch_size, int stride);
+    
+    /**
+     * @brief 两阶段RANSAC：选择Top-K模型
+     * 从粗筛结果中选出内点数最高的k个模型
+     * @param k 选择的模型数量
+     */
+    void launchSelectTopKModels(int k);
+    
+    /**
+     * @brief 两阶段RANSAC：精选阶段内点计数
+     * 对Top-K候选模型进行全量验证
+     * @param k 候选模型数量
+     */
+    void launchFineCountInliersBatch(int k);
     
     /**
      * @brief 启动最优模型查找内核

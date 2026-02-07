@@ -134,23 +134,42 @@ __global__ void countInliersBatch_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
+    const uint8_t *valid_mask,
     const GPUQuadricModel *batch_models,
     int batch_size,
     float threshold,
+    int stride,
     int *batch_inlier_counts)
 {
-    int model_id = blockIdx.y; // 使用2D grid，y维度对应模型
+    int model_id = blockIdx.y;
     if (model_id >= batch_size)
         return;
+
+    // Shared Memory 优化：缓存当前 Block 对应的二次曲面模型参数
+    __shared__ GPUQuadricModel shared_model;
+    
+    // 协作式加载：threadIdx.x == 0 的线程负责从 Global Memory 加载模型
+    if (threadIdx.x == 0)
+    {
+        shared_model = batch_models[model_id];
+    }
+    __syncthreads();  // 确保所有线程等待模型加载完成
 
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     int local_count = 0;
 
-    // 每个线程处理多个点
-    for (int i = thread_id; i < num_remaining; i += blockDim.x * gridDim.x)
+    // 为了避免走样问题，使用基于model_id和thread_id的伪随机偏移
+    int random_offset = (model_id * 17 + thread_id) % stride;
+    
+    // 使用stride进行子采样，同时保持线程间的负载均衡
+    for (int i = thread_id * stride + random_offset; i < num_remaining; i += blockDim.x * gridDim.x * stride)
     {
-        GPUPoint3f point = all_points[remaining_indices[i]];
-        float dist = evaluateQuadricDistance(point, batch_models[model_id]);
+        int global_idx = remaining_indices[i];
+        if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
+        
+        GPUPoint3f point = all_points[global_idx];
+        // 使用 shared memory 中的模型，而不是从 Global Memory 读取
+        float dist = evaluateQuadricDistance(point, shared_model);
 
         if (dist < threshold)
         {
@@ -163,11 +182,11 @@ __global__ void countInliersBatch_Kernel(
     shared_counts[threadIdx.x] = local_count;
     __syncthreads();
 
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    for (int reduce_stride = blockDim.x / 2; reduce_stride > 0; reduce_stride >>= 1)
     {
-        if (threadIdx.x < stride)
+        if (threadIdx.x < reduce_stride)
         {
-            shared_counts[threadIdx.x] += shared_counts[threadIdx.x + stride];
+            shared_counts[threadIdx.x] += shared_counts[threadIdx.x + reduce_stride];
         }
         __syncthreads();
     }
@@ -175,6 +194,71 @@ __global__ void countInliersBatch_Kernel(
     if (threadIdx.x == 0)
     {
         atomicAdd(&batch_inlier_counts[model_id], shared_counts[0]);
+    }
+}
+
+// 精选阶段内点计数内核 - 对Top-K模型全量计数
+__global__ void fineCountInliers_Kernel(
+    const GPUPoint3f *all_points,
+    const int *remaining_indices,
+    int num_remaining,
+    const uint8_t *valid_mask,
+    const GPUQuadricModel *candidate_models,
+    const int *candidate_indices,
+    int k,
+    float threshold,
+    int *fine_inlier_counts)
+{
+    int candidate_id = blockIdx.y;
+    if (candidate_id >= k)
+        return;
+
+    // Shared Memory 优化：缓存当前 Block 对应的候选模型参数
+    __shared__ GPUQuadricModel shared_model;
+    
+    // 协作式加载：threadIdx.x == 0 的线程负责从 Global Memory 加载模型
+    if (threadIdx.x == 0)
+    {
+        shared_model = candidate_models[candidate_id];
+    }
+    __syncthreads();  // 确保所有线程等待模型加载完成
+
+    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int local_count = 0;
+
+    // 全量计数（stride=1），对每个候选模型执行100%点云验证
+    for (int i = thread_id; i < num_remaining; i += blockDim.x * gridDim.x)
+    {
+        int global_idx = remaining_indices[i];
+        if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
+        
+        GPUPoint3f point = all_points[global_idx];
+        // 使用 shared memory 中的模型，而不是从 Global Memory 读取
+        float dist = evaluateQuadricDistance(point, shared_model);
+
+        if (dist < threshold)
+        {
+            local_count++;
+        }
+    }
+
+    // Block内reduce求和
+    __shared__ int shared_counts[256];
+    shared_counts[threadIdx.x] = local_count;
+    __syncthreads();
+
+    for (int reduce_stride = blockDim.x / 2; reduce_stride > 0; reduce_stride >>= 1)
+    {
+        if (threadIdx.x < reduce_stride)
+        {
+            shared_counts[threadIdx.x] += shared_counts[threadIdx.x + reduce_stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0)
+    {
+        atomicAdd(&fine_inlier_counts[candidate_id], shared_counts[0]);
     }
 }
 
@@ -393,6 +477,25 @@ void QuadricDetect::initializeGPUMemory(int batch_size)
                 }
             }
         }
+    }
+    
+    // 预分配两阶段RANSAC竞速相关内存（避免循环内resize）
+    const int max_k = 128;  // 足够处理大部分k值（默认20）
+    if (d_indices_full_.size() < static_cast<size_t>(batch_size))
+    {
+        d_indices_full_.resize(batch_size);
+    }
+    if (d_top_k_indices_.size() < max_k)
+    {
+        d_top_k_indices_.resize(max_k);
+    }
+    if (d_fine_inlier_counts_.size() < max_k)
+    {
+        d_fine_inlier_counts_.resize(max_k);
+    }
+    if (d_candidate_models_.size() < max_k)
+    {
+        d_candidate_models_.resize(max_k);
     }
 }
 
@@ -700,7 +803,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     }
 }
 
-void QuadricDetect::launchCountInliersBatch(int batch_size)
+void QuadricDetect::launchCountInliersBatch(int batch_size, int stride)
 {
     // 修复: 使用2D grid匹配内核实现
     dim3 block(256);
@@ -714,9 +817,11 @@ void QuadricDetect::launchCountInliersBatch(int batch_size)
         getPointsPtr(),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
         static_cast<int>(d_remaining_indices_.size()),
+        d_valid_mask_,  // 新增：传递掩码
         thrust::raw_pointer_cast(d_batch_models_.data()),
         batch_size,
         static_cast<float>(params_.quadric_distance_threshold),
+        stride,  // 新增：传递采样步长
         thrust::raw_pointer_cast(d_batch_inlier_counts_.data()));
     
     // 检查 CUDA 错误
@@ -726,46 +831,91 @@ void QuadricDetect::launchCountInliersBatch(int batch_size)
         std::cerr << "[launchCountInliersBatch] 内核启动错误: " << cudaGetErrorString(kernel_error) << std::endl;
     }
     
+    // 移除同步：让后续操作异步执行（参考平面检测）
+    // cudaStreamSynchronize(stream_);  // 注释掉，让Top-K选择异步执行
+}
+
+void QuadricDetect::launchSelectTopKModels(int k)
+{
+    // 确保预分配的内存足够大
+    int batch_size = static_cast<int>(d_batch_inlier_counts_.size());
+    
+    if (d_indices_full_.size() < static_cast<size_t>(batch_size))
+    {
+        std::cerr << "[launchSelectTopKModels] 错误：d_indices_full_ 预分配内存不足，需要 " << batch_size 
+                  << " 但只有 " << d_indices_full_.size() << std::endl;
+        return;
+    }
+    if (d_top_k_indices_.size() < static_cast<size_t>(k))
+    {
+        std::cerr << "[launchSelectTopKModels] 错误：d_top_k_indices_ 预分配内存不足，需要 " << k 
+                  << " 但只有 " << d_top_k_indices_.size() << std::endl;
+        return;
+    }
+    
+    // 使用预分配的 d_indices_full_ 创建索引序列 [0, 1, 2, ..., batch_size-1]
+    dim3 block(256);
+    dim3 grid((batch_size + block.x - 1) / block.x);
+    initSequenceKernel<<<grid, block, 0, stream_>>>(thrust::raw_pointer_cast(d_indices_full_.data()), batch_size);
+
+    // 按内点数降序排序（使用greater比较器）
+    thrust::sort_by_key(
+        thrust::cuda::par.on(stream_),
+        d_batch_inlier_counts_.begin(), 
+        d_batch_inlier_counts_.begin() + batch_size,
+        d_indices_full_.begin(),
+        thrust::greater<int>()
+    );
+
+    // 提取前k个索引
+    thrust::copy_n(
+        thrust::cuda::par.on(stream_),
+        d_indices_full_.begin(), 
+        k, 
+        d_top_k_indices_.begin()
+    );
+}
+
+void QuadricDetect::launchFineCountInliersBatch(int k)
+{
+    // 确保预分配的内存足够大
+    if (d_fine_inlier_counts_.size() < static_cast<size_t>(k) ||
+        d_candidate_models_.size() < static_cast<size_t>(k))
+    {
+        std::cerr << "[launchFineCountInliersBatch] 错误：预分配内存不足" << std::endl;
+        return;
+    }
+
+    // 从 d_batch_models_ 中提取候选模型
+    // 使用 thrust::gather 高效提取
+    thrust::gather(
+        thrust::cuda::par.on(stream_),
+        d_top_k_indices_.begin(),
+        d_top_k_indices_.begin() + k,
+        d_batch_models_.begin(),
+        d_candidate_models_.begin()
+    );
+
+    // 清零精选计数数组
+    thrust::fill_n(thrust::cuda::par.on(stream_), d_fine_inlier_counts_.begin(), k, 0);
+
+    // 启动精选kernel
+    dim3 block(256);
+    dim3 grid_x((d_remaining_indices_.size() + block.x - 1) / block.x);
+    dim3 grid(grid_x.x, k);  // Y维度对应k个候选模型
+
+    fineCountInliers_Kernel<<<grid, block, 0, stream_>>>(
+        getPointsPtr(),
+        thrust::raw_pointer_cast(d_remaining_indices_.data()),
+        static_cast<int>(d_remaining_indices_.size()),
+        d_valid_mask_,
+        thrust::raw_pointer_cast(d_candidate_models_.data()),
+        thrust::raw_pointer_cast(d_top_k_indices_.data()),
+        k,
+        static_cast<float>(params_.quadric_distance_threshold),
+        thrust::raw_pointer_cast(d_fine_inlier_counts_.data()));
+    
     cudaStreamSynchronize(stream_);
-    
-    // 检查同步错误
-    cudaError_t sync_error = cudaGetLastError();
-    if (sync_error != cudaSuccess)
-    {
-        std::cerr << "[launchCountInliersBatch] 内核执行错误: " << cudaGetErrorString(sync_error) << std::endl;
-    }
-    
-    // 调试信息：打印前10个模型的内点计数
-    if (params_.verbosity > 1)
-    {
-        thrust::host_vector<int> h_inlier_counts(std::min(10, batch_size));
-        thrust::copy_n(d_batch_inlier_counts_.begin(), std::min(10, batch_size), h_inlier_counts.begin());
-        
-        std::cout << "[launchCountInliersBatch] 前10个模型的内点计数:" << std::endl;
-        for (int i = 0; i < std::min(10, batch_size); ++i)
-        {
-            std::cout << "  模型 " << i << ": " << h_inlier_counts[i] << " 个内点" << std::endl;
-        }
-        
-        // 统计所有模型的内点计数
-        thrust::host_vector<int> h_all_counts = d_batch_inlier_counts_;
-        int total_inliers = 0;
-        int max_inliers = 0;
-        int max_idx = 0;
-        for (int i = 0; i < batch_size; ++i)
-        {
-            total_inliers += h_all_counts[i];
-            if (h_all_counts[i] > max_inliers)
-            {
-                max_inliers = h_all_counts[i];
-                max_idx = i;
-            }
-        }
-        std::cout << "[launchCountInliersBatch] 统计信息:" << std::endl;
-        std::cout << "  总内点数: " << total_inliers << std::endl;
-        std::cout << "  最大内点数: " << max_inliers << " (模型 " << max_idx << ")" << std::endl;
-        std::cout << "  平均内点数: " << (batch_size > 0 ? static_cast<float>(total_inliers) / batch_size : 0.0f) << std::endl;
-    }
 }
 
 void QuadricDetect::launchFindBestModel(int batch_size)
