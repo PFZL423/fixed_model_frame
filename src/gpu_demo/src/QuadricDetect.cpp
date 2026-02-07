@@ -375,6 +375,10 @@ void QuadricDetect::findQuadrics_BatchGPU()
         if (params_.verbosity > 0)
         {
             outputBestModelDetails(best_gpu_model, best_count, best_model_idx, iteration + 1);
+            
+            // 新增：最终检查日志
+            std::cout << "[Final Check] Best model count: " << best_count 
+                      << ", Index: " << best_model_idx << std::endl;
         }
 
         // Step 7: 提取内点索引

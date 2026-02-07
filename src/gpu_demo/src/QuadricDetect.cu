@@ -155,17 +155,21 @@ __global__ void countInliersBatch_Kernel(
     }
     __syncthreads();  // 确保所有线程等待模型加载完成
 
-    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    // 优化：每个线程直接处理一个采样点，不再使用循环
+    int sampled_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int local_count = 0;
 
-    // 为了避免走样问题，使用基于model_id和thread_id的伪随机偏移
-    int random_offset = (model_id * 17 + thread_id) % stride;
+    // 为了避免走样问题，使用基于model_id和sampled_idx的伪随机偏移
+    int random_offset = (model_id * 17 + sampled_idx) % stride;
     
-    // 使用stride进行子采样，同时保持线程间的负载均衡
-    for (int i = thread_id * stride + random_offset; i < num_remaining; i += blockDim.x * gridDim.x * stride)
+    // 直接计算原始点索引（基于采样索引）
+    int i = sampled_idx * stride + random_offset;
+    
+    // 边界检查：确保不越界
+    if (i < num_remaining)
     {
         int global_idx = remaining_indices[i];
-        if (valid_mask[global_idx] == 0) continue;  // 跳过已移除的点
+        if (valid_mask[global_idx] == 0) return;  // 跳过已移除的点
         
         GPUPoint3f point = all_points[global_idx];
         // 使用 shared memory 中的模型，而不是从 Global Memory 读取
@@ -173,7 +177,7 @@ __global__ void countInliersBatch_Kernel(
 
         if (dist < threshold)
         {
-            local_count++;
+            local_count = 1;  // 单个点，直接设为1
         }
     }
 
@@ -262,62 +266,22 @@ __global__ void fineCountInliers_Kernel(
     }
 }
 
-__device__ inline float evaluateQuadricDistance(
+__device__ __forceinline__ float evaluateQuadricDistance(
     const GPUPoint3f &point,
     const GPUQuadricModel &model)
 {
     float x = point.x, y = point.y, z = point.z;
 
-    //  修复开始：添加输入验证
-    // 验证输入点的有效性
-    if (!isfinite(x) || !isfinite(y) || !isfinite(z) ||
-        isnan(x) || isnan(y) || isnan(z) ||
-        isinf(x) || isinf(y) || isinf(z))
-    {
-        return 1e10f; // 返回一个很大的距离，表示无效点
-    }
+    // 手动展开4x4矩阵乘法：[x y z 1] * Q * [x y z 1]^T
+    // Q矩阵按行主序存储：coeffs[i*4+j] = Q(i,j)
+    // 确保所有16个系数都参与计算，与数学定义完全一致
+    float result = 
+        x * x * model.coeffs[0] + x * y * model.coeffs[1] + x * z * model.coeffs[2] + x * model.coeffs[3] +
+        y * x * model.coeffs[4] + y * y * model.coeffs[5] + y * z * model.coeffs[6] + y * model.coeffs[7] +
+        z * x * model.coeffs[8] + z * y * model.coeffs[9] + z * z * model.coeffs[10] + z * model.coeffs[11] +
+        x * model.coeffs[12] + y * model.coeffs[13] + z * model.coeffs[14] + model.coeffs[15];
 
-    // 验证模型系数的有效性
-    bool model_valid = true;
-    for (int i = 0; i < 16; ++i)
-    {
-        if (!isfinite(model.coeffs[i]) || isnan(model.coeffs[i]) || isinf(model.coeffs[i]))
-        {
-            model_valid = false;
-            break;
-        }
-    }
-
-    if (!model_valid)
-    {
-        return 1e10f; // 返回一个很大的距离，表示无效模型
-    }
-    //  修复结束
-
-    // 手写二次型计算: [x y z 1] * Q * [x y z 1]^T
-    float result = 0.0f;
-    float coords[4] = {x, y, z, 1.0f};
-
-    //  修复：使用更安全的矩阵乘法，避免潜在的内存访问问题
-    for (int i = 0; i < 4; ++i)
-    {
-        for (int j = 0; j < 4; ++j)
-        {
-            int idx = i * 4 + j;      // 确保索引在有效范围内
-            if (idx >= 0 && idx < 16) //  添加边界检查
-            {
-                float coeff = model.coeffs[idx];
-                //  验证每次乘法的结果
-                float term = coords[i] * coeff * coords[j];
-                if (isfinite(term) && !isnan(term) && !isinf(term))
-                {
-                    result += term;
-                }
-            }
-        }
-    }
-
-    //  修复：验证最终结果的有效性
+    // 只保留最终结果检查作为兜底
     if (!isfinite(result) || isnan(result) || isinf(result))
     {
         return 1e10f; // 返回一个很大的距离，表示计算失败
@@ -408,6 +372,75 @@ __global__ void initSequenceKernel(int *indices, int n)
     if (idx < n)
     {
         indices[idx] = idx;
+    }
+}
+
+// Bitonic Sort内核实现 - 高性能Top-K选择（降序排序）
+__global__ void bitonicSort1024Kernel(
+    int *inlier_counts,
+    int *model_indices,
+    int n)
+{
+    // Shared Memory：存储计数和索引（需要512线程，每个线程处理2个元素）
+    __shared__ int s_counts[1024];
+    __shared__ int s_indices[1024];
+    
+    int tid = threadIdx.x;
+    
+    // 加载数据到shared memory（512线程，每个线程加载2个元素）
+    if (tid < 512)
+    {
+        s_counts[tid * 2] = inlier_counts[tid * 2];
+        s_indices[tid * 2] = model_indices[tid * 2];
+        if (tid * 2 + 1 < n)
+        {
+            s_counts[tid * 2 + 1] = inlier_counts[tid * 2 + 1];
+            s_indices[tid * 2 + 1] = model_indices[tid * 2 + 1];
+        }
+    }
+    __syncthreads();
+    
+    // Bitonic Sort（降序排序，最大值在索引0）
+    // 外层循环：构建bitonic序列的大小（2, 4, 8, ..., 1024）
+    for (int k = 2; k <= n; k <<= 1)
+    {
+        // 内层循环：比较和交换的步长（k/2, k/4, ..., 1）
+        for (int j = k >> 1; j > 0; j >>= 1)
+        {
+            // 每个线程处理一个元素对
+            int i = tid;
+            int ixj = i ^ j;  // 要比较的另一个索引
+            
+            if (i < n && ixj < n && i < ixj)
+            {
+                // 对于降序排序（最大值在索引0）：
+                // 无论元素在哪个段，都应该让较大的值上移（较小的值下移）
+                // 统一使用 s_counts[i] < s_counts[ixj] 作为交换条件
+                if (s_counts[i] < s_counts[ixj])
+                {
+                    // swap
+                    int tmp_c = s_counts[i];
+                    int tmp_i = s_indices[i];
+                    s_counts[i] = s_counts[ixj];
+                    s_indices[i] = s_indices[ixj];
+                    s_counts[ixj] = tmp_c;
+                    s_indices[ixj] = tmp_i;
+                }
+            }
+            __syncthreads();
+        }
+    }
+    
+    // 写回结果
+    if (tid < 512)
+    {
+        inlier_counts[tid * 2] = s_counts[tid * 2];
+        model_indices[tid * 2] = s_indices[tid * 2];
+        if (tid * 2 + 1 < n)
+        {
+            inlier_counts[tid * 2 + 1] = s_counts[tid * 2 + 1];
+            model_indices[tid * 2 + 1] = s_indices[tid * 2 + 1];
+        }
     }
 }
 
@@ -805,10 +838,12 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
 
 void QuadricDetect::launchCountInliersBatch(int batch_size, int stride)
 {
-    // 修复: 使用2D grid匹配内核实现
+    // 优化：Grid基于采样点数计算，而不是全量点数
     dim3 block(256);
-    dim3 grid_x((d_remaining_indices_.size() + block.x - 1) / block.x);
-    dim3 grid(grid_x.x, batch_size); // 2D grid: (points, models)
+    int num_remaining = static_cast<int>(d_remaining_indices_.size());
+    int sampled_points = (num_remaining + stride - 1) / stride;  // 向上取整
+    dim3 grid_x((sampled_points + block.x - 1) / block.x);
+    dim3 grid(grid_x.x, batch_size); // 2D grid: (sampled_points, models)
 
     // 先清零计数器
     thrust::fill(thrust::cuda::par.on(stream_), d_batch_inlier_counts_.begin(), d_batch_inlier_counts_.end(), 0);
@@ -816,7 +851,7 @@ void QuadricDetect::launchCountInliersBatch(int batch_size, int stride)
     countInliersBatch_Kernel<<<grid, block, 0, stream_>>>(
         getPointsPtr(),
         thrust::raw_pointer_cast(d_remaining_indices_.data()),
-        static_cast<int>(d_remaining_indices_.size()),
+        num_remaining,
         d_valid_mask_,  // 新增：传递掩码
         thrust::raw_pointer_cast(d_batch_models_.data()),
         batch_size,
@@ -858,16 +893,29 @@ void QuadricDetect::launchSelectTopKModels(int k)
     dim3 grid((batch_size + block.x - 1) / block.x);
     initSequenceKernel<<<grid, block, 0, stream_>>>(thrust::raw_pointer_cast(d_indices_full_.data()), batch_size);
 
-    // 按内点数降序排序（使用greater比较器）
-    thrust::sort_by_key(
-        thrust::cuda::par.on(stream_),
-        d_batch_inlier_counts_.begin(), 
-        d_batch_inlier_counts_.begin() + batch_size,
-        d_indices_full_.begin(),
-        thrust::greater<int>()
-    );
+    // 优化：使用Bitonic Sort替代thrust::sort_by_key（仅当batch_size==1024时）
+    if (batch_size == 1024)
+    {
+        // 使用Bitonic Sort（单Block，512线程）
+        dim3 sort_block(512);
+        bitonicSort1024Kernel<<<1, sort_block, 0, stream_>>>(
+            thrust::raw_pointer_cast(d_batch_inlier_counts_.data()),
+            thrust::raw_pointer_cast(d_indices_full_.data()),
+            batch_size);
+    }
+    else
+    {
+        // 降级方案：使用thrust::sort_by_key（对于非1024的batch_size）
+        thrust::sort_by_key(
+            thrust::cuda::par.on(stream_),
+            d_batch_inlier_counts_.begin(), 
+            d_batch_inlier_counts_.begin() + batch_size,
+            d_indices_full_.begin(),
+            thrust::greater<int>()
+        );
+    }
 
-    // 提取前k个索引
+    // 提取前k个索引（排序后索引0是最大值）
     thrust::copy_n(
         thrust::cuda::par.on(stream_),
         d_indices_full_.begin(), 
@@ -920,46 +968,53 @@ void QuadricDetect::launchFineCountInliersBatch(int k)
 
 void QuadricDetect::launchFindBestModel(int batch_size)
 {
-    // 1. 获取 Thrust 指针
-    thrust::device_ptr<int> inlier_counts_ptr = thrust::device_pointer_cast(
-        thrust::raw_pointer_cast(d_batch_inlier_counts_.data()));
-
-    // 2. 使用官方库找最大值 (绑定流)
-    // 注意：这将直接返回最大值的迭代器，无需手写 reduction
-    auto max_iter = thrust::max_element(
-        thrust::cuda::par.on(stream_), 
-        inlier_counts_ptr, 
-        inlier_counts_ptr + batch_size
-    );
-
-    // 3. 计算索引
-    int best_idx = max_iter - inlier_counts_ptr;
+    // 直接获取排序后的结果（排序后索引0是最优模型）
+    // 注意：此函数假设d_batch_inlier_counts_和d_indices_full_已经通过launchSelectTopKModels排序
+    int best_idx = 0;
+    int best_count = 0;
     
-    // 4. 获取最大值
-    int best_count = *max_iter;
-    
-    // 5. 异步拷贝结果到设备内存
+    // 直接从Device内存异步拷贝索引0的值
     cudaMemcpyAsync(
-        thrust::raw_pointer_cast(d_best_model_index_.data()), 
-        &best_idx, 
-        sizeof(int), 
-        cudaMemcpyHostToDevice, 
+        &best_idx,
+        thrust::raw_pointer_cast(d_indices_full_.data()),
+        sizeof(int),
+        cudaMemcpyDeviceToHost,
         stream_
     );
-
+    
     cudaMemcpyAsync(
-        thrust::raw_pointer_cast(d_best_model_count_.data()), 
-        &best_count, 
-        sizeof(int), 
-        cudaMemcpyHostToDevice, 
+        &best_count,
+        thrust::raw_pointer_cast(d_batch_inlier_counts_.data()),
+        sizeof(int),
+        cudaMemcpyDeviceToHost,
         stream_
     );
-
+    
+    // 同步等待拷贝完成
     cudaStreamSynchronize(stream_);
     
-    // 调试验证
-    if (params_.verbosity > 0) {
-        std::cout << "[Thrust] Best Index: " << best_idx << " Count: " << best_count << std::endl;
+    // 写回Device内存（保持兼容性）
+    cudaMemcpyAsync(
+        thrust::raw_pointer_cast(d_best_model_index_.data()),
+        &best_idx,
+        sizeof(int),
+        cudaMemcpyHostToDevice,
+        stream_
+    );
+    
+    cudaMemcpyAsync(
+        thrust::raw_pointer_cast(d_best_model_count_.data()),
+        &best_count,
+        sizeof(int),
+        cudaMemcpyHostToDevice,
+        stream_
+    );
+    
+    // 验证日志
+    if (params_.verbosity > 0)
+    {
+        std::cout << "[Final Check] Best model count: " << best_count 
+                  << ", Index: " << best_idx << std::endl;
     }
 }
 

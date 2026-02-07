@@ -209,3 +209,16 @@ __global__ void extractQuadricModels_Kernel(
     const float *batch_eigenvectors,
     GPUQuadricModel *batch_models,
     int batch_size);
+
+/**
+ * @brief Bitonic Sort内核 - 高性能Top-K选择
+ * 使用Shared Memory在单Block内对1024个元素进行降序排序
+ * 排序后最大值在索引0
+ * @param inlier_counts 内点计数数组（输入/输出）
+ * @param model_indices 模型索引数组（输入/输出）
+ * @param n 数组大小（必须是1024）
+ */
+__global__ void bitonicSort1024Kernel(
+    int *inlier_counts,
+    int *model_indices,
+    int n);
