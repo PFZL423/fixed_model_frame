@@ -387,7 +387,9 @@ __global__ void sampleAndBuildMatrices_Kernel(
     curandState *rand_states,
     int batch_size,
     float *batch_matrices,
-    GPUQuadricModel *batch_models)
+    GPUQuadricModel *batch_models,
+    float *batch_explicit_coeffs,  // 🆕 输出：显式系数 [batch_size × 6]
+    float *batch_transforms)       // 🆕 输出：变换矩阵 [batch_size × 12] (3x4)
 {
     int model_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (model_id >= batch_size)
@@ -716,6 +718,14 @@ __global__ void sampleAndBuildMatrices_Kernel(
         model->coeffs[13] = 0.0f;  // Q(3,1) = H = 0
         model->coeffs[14] = 0.0f;  // Q(3,2) = I = 0
         model->coeffs[15] = 0.0f;  // Q(3,3) = J = 0
+        
+        // 🆕 求解失败时，填充零值（占位Q矩阵）
+        for (int i = 0; i < 6; ++i) {
+            batch_explicit_coeffs[model_id * 6 + i] = 0.0f;
+        }
+        for (int i = 0; i < 12; ++i) {
+            batch_transforms[model_id * 12 + i] = 0.0f;
+        }
     }
     else
     {
@@ -765,6 +775,19 @@ __global__ void sampleAndBuildMatrices_Kernel(
         for (int i = 0; i < 16; ++i)
         {
             model->coeffs[i] = Qglobal[i];
+        }
+        
+        // 🆕 保存显式系数到GPU缓冲区
+        for (int i = 0; i < 6; ++i) {
+            batch_explicit_coeffs[model_id * 6 + i] = coeffs_local[i];
+        }
+        
+        // 🆕 保存变换矩阵T的前3行（3x4，即[R|p]）到GPU缓冲区
+        // T的前3行是 [R | p]，行主序存储
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                batch_transforms[model_id * 12 + i * 4 + j] = T[i * 4 + j];
+            }
         }
     }
 
@@ -1105,6 +1128,8 @@ void QuadricDetect::initializeGPUMemory(int batch_size)
     d_batch_models_.resize(batch_size);
     d_batch_inlier_counts_.resize(batch_size);
     d_rand_states_.resize(batch_size * 10);
+    d_batch_explicit_coeffs_.resize(batch_size * 6);  // 🆕 显式系数 [batch_size × 6]
+    d_batch_transforms_.resize(batch_size * 12);     // 🆕 变换矩阵 [batch_size × 12] (3x4)
 
     // 初始化结果存储
     d_best_model_index_.resize(1);
@@ -1337,7 +1362,9 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         thrust::raw_pointer_cast(d_rand_states_.data()),
         batch_size,
         thrust::raw_pointer_cast(d_batch_matrices_.data()),
-        thrust::raw_pointer_cast(d_batch_models_.data()));
+        thrust::raw_pointer_cast(d_batch_models_.data()),
+        thrust::raw_pointer_cast(d_batch_explicit_coeffs_.data()),  // 🆕 显式系数缓冲区
+        thrust::raw_pointer_cast(d_batch_transforms_.data()));       // 🆕 变换矩阵缓冲区
 
     cudaError_t kernel_error = cudaGetLastError();
     if (kernel_error != cudaSuccess)

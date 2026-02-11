@@ -42,7 +42,9 @@ __global__ void sampleAndBuildMatrices_Kernel(
     curandState *rand_states,
     int batch_size,
     float *batch_matrices,
-    GPUQuadricModel *batch_models);
+    GPUQuadricModel *batch_models,
+    float *batch_explicit_coeffs,  // 🆕 输出：显式系数 [batch_size × 6]
+    float *batch_transforms);      // 🆕 输出：变换矩阵 [batch_size × 12] (3x4)
 
 /**
  * @brief 批量内点计数内核 - 2D并行验证（粗筛阶段，支持子采样）

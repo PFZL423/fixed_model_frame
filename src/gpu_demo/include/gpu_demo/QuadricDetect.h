@@ -13,6 +13,8 @@
 #include <thrust/set_operations.h>
 #include <thrust/sort.h>
 #include <chrono>  // 添加计时器支持
+#include <visualization_msgs/MarkerArray.h>
+#include <std_msgs/Header.h>
 
 // 使用GPUPreprocessor中的GPUPoint3f定义
 #include "gpu_demo/GPUPreprocessor.h"
@@ -123,11 +125,21 @@ struct DetectedPrimitive
     std::string type;                               ///< 几何体类型 ("quadric", "plane", etc.)
     Eigen::Matrix4f model_coefficients;            ///< 4x4二次曲面矩阵Q或平面参数
     pcl::PointCloud<pcl::PointXYZI>::Ptr inliers;   ///< 属于该几何体的内点点云
+    
+    // 🆕 可视化相关数据（仅对最优模型填充）
+    std::vector<GPUPoint3f> hull_points_local;     ///< 局部坐标系下的凸包边界点（2D投影）
+    float explicit_coeffs[6];                      ///< 显式系数 [a, b, c, d, e, f]，用于 z=ax²+bxy+cy²+dx+ey+f
+    float transform[12];                           ///< 3x4齐次变换矩阵 [R | p]，行主序存储（前9个是R，后3个是p）
+    bool has_visualization_data;                    ///< 标记是否包含可视化数据
 
     DetectedPrimitive()
     {
         inliers.reset(new pcl::PointCloud<pcl::PointXYZI>());
         model_coefficients.setZero();
+        hull_points_local.clear();
+        std::fill(explicit_coeffs, explicit_coeffs + 6, 0.0f);
+        std::fill(transform, transform + 12, 0.0f);
+        has_visualization_data = false;
     }
 };
 } // namespace quadric
@@ -190,6 +202,23 @@ public:
      */
     bool processCloudDirect(GPUPoint3f* d_points, size_t count);
 
+    /**
+     * @brief 计算二次曲面的可视化Marker（惰性触发）
+     * @param primitive 检测到的二次曲面基元（必须包含可视化数据）
+     * @param marker_array [out] 输出的Marker数组
+     * @param header ROS消息头
+     * @param grid_step 网格步长（米）
+     * @param alpha 透明度 [0,1]
+     * @param clip_to_hull 是否裁剪到凸包边界
+     */
+    void computeVisualizationMarkers(
+        const quadric::DetectedPrimitive &primitive,
+        visualization_msgs::MarkerArray &marker_array,
+        const std_msgs::Header &header,
+        float grid_step = 0.1f,
+        float alpha = 0.65f,
+        bool clip_to_hull = true) const;
+
 private:
     // 添加这个新函数的声明
     void validateInversePowerResults(int batch_size);
@@ -227,6 +256,8 @@ private:
     thrust::device_vector<GPUQuadricModel> d_batch_models_; ///< 批量拟合的二次曲面模型
     thrust::device_vector<int> d_batch_inlier_counts_;     ///< 每个模型的内点计数
     thrust::device_vector<curandState> d_rand_states_;     ///< GPU随机数生成器状态
+    thrust::device_vector<float> d_batch_explicit_coeffs_; ///< 🆕 批量显式系数 [batch_size × 6]
+    thrust::device_vector<float> d_batch_transforms_;      ///< 🆕 批量变换矩阵 [batch_size × 12] (3x4)
     
     // 存储最优结果
     thrust::device_vector<int> d_best_model_index_;        ///< 最优模型在batch中的索引

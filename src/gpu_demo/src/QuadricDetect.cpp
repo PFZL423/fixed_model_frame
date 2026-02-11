@@ -7,6 +7,9 @@
 #include <cmath>
 #include <algorithm>
 #include <iomanip>
+#include <numeric>
+#include <geometry_msgs/Point.h>
+#include <ros/ros.h>
 
 using DetectorParams = quadric::DetectorParams;
 using DetectedPrimitive = quadric::DetectedPrimitive;
@@ -392,6 +395,34 @@ void QuadricDetect::findQuadrics_BatchGPU()
         detected_quadric.type = "quadric";
         detected_quadric.model_coefficients = convertGPUModelToEigen(best_gpu_model);
         detected_quadric.inliers = inlier_cloud;
+        
+        // 🆕 从GPU缓冲区读取最优模型的显式系数和变换矩阵
+        if (best_model_idx >= 0 && best_model_idx < batch_size) {
+            thrust::host_vector<float> h_explicit_coeffs(6);
+            thrust::host_vector<float> h_transform(12);
+            thrust::copy_n(d_batch_explicit_coeffs_.begin() + best_model_idx * 6, 6, h_explicit_coeffs.begin());
+            thrust::copy_n(d_batch_transforms_.begin() + best_model_idx * 12, 12, h_transform.begin());
+            
+            // 保存到DetectedPrimitive
+            for (int i = 0; i < 6; ++i) {
+                detected_quadric.explicit_coeffs[i] = h_explicit_coeffs[i];
+            }
+            for (int i = 0; i < 12; ++i) {
+                detected_quadric.transform[i] = h_transform[i];
+            }
+            detected_quadric.has_visualization_data = true;
+            
+            if (params_.verbosity > 0) {
+                ROS_INFO("[QuadricDetect] 已保存可视化数据: best_model_idx=%d, explicit_coeffs=[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]", 
+                         best_model_idx, h_explicit_coeffs[0], h_explicit_coeffs[1], h_explicit_coeffs[2],
+                         h_explicit_coeffs[3], h_explicit_coeffs[4], h_explicit_coeffs[5]);
+            }
+        } else {
+            // 如果索引无效，标记为无可视化数据
+            detected_quadric.has_visualization_data = false;
+            ROS_WARN("[QuadricDetect] best_model_idx无效 (%d)，无法保存可视化数据", best_model_idx);
+        }
+        
         detected_primitives_.push_back(detected_quadric);
 
         // Step 10: 移除内点
@@ -964,3 +995,386 @@ void QuadricDetect::outputBestModelDetails(const GPUQuadricModel &best_model, in
 
 //     return true;
 // }
+
+// ========================================
+// 可视化函数实现
+// ========================================
+
+// 辅助函数：将全局点变换到局部坐标系
+static GPUPoint3f transformToLocal(const pcl::PointXYZI &pt_global, const float transform[12])
+{
+    // 对应 .cu 中的 T[i*4 + j] 存储方式：
+    // transform[0-2] = R的第0行前3列 [X[0], Y[0], Z[0]]
+    // transform[3] = p.x
+    // transform[4-6] = R的第1行前3列 [X[1], Y[1], Z[1]]
+    // transform[7] = p.y
+    // transform[8-10] = R的第2行前3列 [X[2], Y[2], Z[2]]
+    // transform[11] = p.z
+    float R[9] = {transform[0], transform[1], transform[2],  // Row 0
+                  transform[4], transform[5], transform[6],  // Row 1
+                  transform[8], transform[9], transform[10]}; // Row 2
+    float p[3] = {transform[3], transform[7], transform[11]}; // Translation
+    
+    // P - p
+    float dx = pt_global.x - p[0];
+    float dy = pt_global.y - p[1];
+    float dz = pt_global.z - p[2];
+    
+    // R^T * (P - p)
+    GPUPoint3f pt_local;
+    pt_local.x = R[0]*dx + R[3]*dy + R[6]*dz;  // R^T的第一行
+    pt_local.y = R[1]*dx + R[4]*dy + R[7]*dz;  // R^T的第二行
+    pt_local.z = R[2]*dx + R[5]*dy + R[8]*dz;  // R^T的第三行
+    
+    return pt_local;
+}
+
+// 辅助函数：将局部点变换到全局坐标系
+static GPUPoint3f transformToGlobal(const GPUPoint3f &pt_local, const float transform[12])
+{
+    // 对应 .cu 中的 T[i*4 + j] 存储方式：
+    // transform[0-2] = R的第0行前3列 [X[0], Y[0], Z[0]]
+    // transform[3] = p.x
+    // transform[4-6] = R的第1行前3列 [X[1], Y[1], Z[1]]
+    // transform[7] = p.y
+    // transform[8-10] = R的第2行前3列 [X[2], Y[2], Z[2]]
+    // transform[11] = p.z
+    float R[9] = {transform[0], transform[1], transform[2],  // Row 0
+                  transform[4], transform[5], transform[6],  // Row 1
+                  transform[8], transform[9], transform[10]}; // Row 2
+    float p[3] = {transform[3], transform[7], transform[11]}; // Translation
+    
+    // R * P_local + p
+    GPUPoint3f pt_global;
+    pt_global.x = R[0]*pt_local.x + R[1]*pt_local.y + R[2]*pt_local.z + p[0];
+    pt_global.y = R[3]*pt_local.x + R[4]*pt_local.y + R[5]*pt_local.z + p[1];
+    pt_global.z = R[6]*pt_local.x + R[7]*pt_local.y + R[8]*pt_local.z + p[2];
+    
+    return pt_global;
+}
+
+// Graham Scan凸包算法
+struct Point2D {
+    float x, y;
+    int idx;
+};
+
+static std::vector<Point2D> grahamScan(std::vector<Point2D> &points)
+{
+    if (points.size() < 3) return points;
+    
+    // 1. 找最下方的点（y最小，相同则x最小）
+    int bottom_idx = 0;
+    for (size_t i = 1; i < points.size(); ++i) {
+        if (points[i].y < points[bottom_idx].y ||
+            (points[i].y == points[bottom_idx].y && points[i].x < points[bottom_idx].x)) {
+            bottom_idx = i;
+        }
+    }
+    std::swap(points[0], points[bottom_idx]);
+    Point2D pivot = points[0];
+    
+    // 2. 按极角排序（相对于pivot）
+    std::sort(points.begin() + 1, points.end(), [&pivot](const Point2D &a, const Point2D &b) {
+        float cross = (a.x - pivot.x) * (b.y - pivot.y) - (a.y - pivot.y) * (b.x - pivot.x);
+        if (fabsf(cross) < 1e-6f) {
+            float dist_a = (a.x - pivot.x) * (a.x - pivot.x) + (a.y - pivot.y) * (a.y - pivot.y);
+            float dist_b = (b.x - pivot.x) * (b.x - pivot.x) + (b.y - pivot.y) * (b.y - pivot.y);
+            return dist_a < dist_b;
+        }
+        return cross > 0;
+    });
+    
+    // 3. 构建凸包栈
+    std::vector<Point2D> hull;
+    hull.push_back(points[0]);
+    if (points.size() > 1) hull.push_back(points[1]);
+    
+    for (size_t i = 2; i < points.size(); ++i) {
+        while (hull.size() > 1) {
+            Point2D &p1 = hull[hull.size() - 2];
+            Point2D &p2 = hull[hull.size() - 1];
+            Point2D &p3 = points[i];
+            float cross = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
+            if (cross > 0) break;
+            hull.pop_back();
+        }
+        hull.push_back(points[i]);
+    }
+    
+    return hull;
+}
+
+// 射线法判断点是否在凸包内
+static bool isPointInConvexHull(const Point2D &pt, const std::vector<Point2D> &hull)
+{
+    if (hull.size() < 3) return false;
+    
+    // 从点向右发射射线，计算与凸包边界的交点数量
+    int intersections = 0;
+    for (size_t i = 0; i < hull.size(); ++i) {
+        size_t j = (i + 1) % hull.size();
+        Point2D &p1 = const_cast<Point2D&>(hull[i]);
+        Point2D &p2 = const_cast<Point2D&>(hull[j]);
+        
+        // 检查射线是否与边相交
+        if ((p1.y > pt.y) != (p2.y > pt.y)) {
+            // 避免除零错误
+            float dy = p2.y - p1.y;
+            if (fabsf(dy) > 1e-6f) {
+                float x_intersect = (pt.y - p1.y) * (p2.x - p1.x) / dy + p1.x;
+                if (x_intersect > pt.x) {
+                    intersections++;
+                }
+            }
+        }
+    }
+    
+    return (intersections % 2) == 1;
+}
+
+void QuadricDetect::computeVisualizationMarkers(
+    const quadric::DetectedPrimitive &primitive,
+    visualization_msgs::MarkerArray &marker_array,
+    const std_msgs::Header &header,
+    float grid_step,
+    float alpha,
+    bool clip_to_hull) const
+{
+    if (!primitive.has_visualization_data) {
+        ROS_WARN("[computeVisualizationMarkers] primitive.has_visualization_data = false，跳过可视化");
+        return;
+    }
+    
+    if (primitive.inliers->empty()) {
+        ROS_WARN("[computeVisualizationMarkers] primitive.inliers为空，跳过可视化");
+        return;
+    }
+    
+    ROS_INFO("[computeVisualizationMarkers] 开始处理，内点数: %zu", primitive.inliers->size());
+    
+    // ========================================
+    // 1. 3σ离群点剔除
+    // ========================================
+    std::vector<GPUPoint3f> local_points;
+    std::vector<float> distances;
+    
+    for (const auto &pt : primitive.inliers->points) {
+        GPUPoint3f pt_local = transformToLocal(pt, primitive.transform);
+        float dist = sqrtf(pt_local.x * pt_local.x + pt_local.y * pt_local.y);
+        distances.push_back(dist);
+        local_points.push_back(pt_local);
+    }
+    
+    // 计算均值和标准差
+    float mean = 0.0f;
+    for (float d : distances) {
+        mean += d;
+    }
+    mean /= distances.size();
+    
+    float variance = 0.0f;
+    for (float d : distances) {
+        variance += (d - mean) * (d - mean);
+    }
+    float std_dev = sqrtf(variance / distances.size());
+    
+    // 过滤：d < μ + 3σ
+    float threshold = mean + 3.0f * std_dev;
+    std::vector<GPUPoint3f> filtered_local_points;
+    for (size_t i = 0; i < local_points.size(); ++i) {
+        if (distances[i] < threshold) {
+            filtered_local_points.push_back(local_points[i]);
+        }
+    }
+    
+    ROS_INFO("[computeVisualizationMarkers] 3σ过滤: 原始内点数=%zu, 过滤后=%zu, mean=%.3f, std_dev=%.3f, threshold=%.3f", 
+             local_points.size(), filtered_local_points.size(), mean, std_dev, threshold);
+    
+    if (filtered_local_points.size() < 3) {
+        ROS_WARN("[computeVisualizationMarkers] 过滤后点数太少 (%zu < 3)，无法生成凸包", filtered_local_points.size());
+        return; // 点太少，无法生成凸包
+    }
+    
+    // ========================================
+    // 2. Graham Scan凸包生成
+    // ========================================
+    std::vector<Point2D> points_2d;
+    for (size_t i = 0; i < filtered_local_points.size(); ++i) {
+        points_2d.push_back({filtered_local_points[i].x, filtered_local_points[i].y, static_cast<int>(i)});
+    }
+    
+    std::vector<Point2D> hull_2d = grahamScan(points_2d);
+    
+    ROS_INFO("[computeVisualizationMarkers] 凸包生成: 输入点数=%zu, 凸包点数=%zu", points_2d.size(), hull_2d.size());
+    
+    if (hull_2d.size() < 3) {
+        ROS_WARN("[computeVisualizationMarkers] 凸包点数太少 (%zu < 3)，无法继续", hull_2d.size());
+        return;
+    }
+    
+    // 保存凸包点到primitive（注意：这里需要修改primitive，但函数是const，所以暂时跳过）
+    // primitive.hull_points_local.clear();
+    // for (const auto &pt : hull_2d) {
+    //     primitive.hull_points_local.push_back({pt.x, pt.y, 0.0f});
+    // }
+    
+    // ========================================
+    // 3. 计算凸包的XY Bounding Box
+    // ========================================
+    float min_x = hull_2d[0].x, max_x = hull_2d[0].x;
+    float min_y = hull_2d[0].y, max_y = hull_2d[0].y;
+    for (const auto &pt : hull_2d) {
+        min_x = std::min(min_x, pt.x);
+        max_x = std::max(max_x, pt.x);
+        min_y = std::min(min_y, pt.y);
+        max_y = std::max(max_y, pt.y);
+    }
+    
+    float bbox_dx = max_x - min_x;
+    float bbox_dy = max_y - min_y;
+    ROS_INFO("[computeVisualizationMarkers] Bounding Box: min_x=%.3f, max_x=%.3f, min_y=%.3f, max_y=%.3f, 范围: dx=%.3f, dy=%.3f",
+             min_x, max_x, min_y, max_y, bbox_dx, bbox_dy);
+    
+    // ========================================
+    // 4. 生成网格点并判断是否在凸包内
+    // ========================================
+    std::vector<geometry_msgs::Point> triangle_vertices;
+    std::vector<geometry_msgs::Point> triangle_normals;
+    
+    // 自动调整网格步长：如果步长太大（超过bounding box的10%），则缩小
+    float adjusted_grid_step = grid_step;
+    if (grid_step > bbox_dx * 0.1f || grid_step > bbox_dy * 0.1f) {
+        adjusted_grid_step = std::min(bbox_dx, bbox_dy) * 0.05f; // 使用bounding box的5%作为步长
+        ROS_WARN("[computeVisualizationMarkers] 网格步长太大 (%.4f)，自动调整为 %.4f", grid_step, adjusted_grid_step);
+    }
+    
+    // 生成网格点
+    std::vector<std::vector<int>> grid_indices; // 存储网格点的索引映射
+    int grid_width = static_cast<int>((max_x - min_x) / adjusted_grid_step) + 1;
+    int grid_height = static_cast<int>((max_y - min_y) / adjusted_grid_step) + 1;
+    grid_indices.resize(grid_height, std::vector<int>(grid_width, -1));
+    
+    ROS_INFO("[computeVisualizationMarkers] 网格参数: 原始grid_step=%.4f, 调整后=%.4f, grid_width=%d, grid_height=%d, clip_to_hull=%d",
+             grid_step, adjusted_grid_step, grid_width, grid_height, clip_to_hull);
+    
+    int vertex_count = 0;
+    int points_in_hull = 0;
+    int points_out_hull = 0;
+    for (int i = 0; i < grid_height; ++i) {
+        for (int j = 0; j < grid_width; ++j) {
+            float x = min_x + j * adjusted_grid_step;
+            float y = min_y + i * adjusted_grid_step;
+            Point2D grid_pt = {x, y, 0};
+            
+            // 射线法判断是否在凸包内
+            bool in_hull = !clip_to_hull || isPointInConvexHull(grid_pt, hull_2d);
+            
+            if (in_hull) {
+                points_in_hull++;
+                // 显式映射：z = ax² + bxy + cy² + dx + ey + f
+                float z = primitive.explicit_coeffs[0] * x * x +
+                          primitive.explicit_coeffs[1] * x * y +
+                          primitive.explicit_coeffs[2] * y * y +
+                          primitive.explicit_coeffs[3] * x +
+                          primitive.explicit_coeffs[4] * y +
+                          primitive.explicit_coeffs[5];
+                
+                // 计算法向量：n = [-(2ax+by+d), -(bx+2cy+e), 1]
+                float nx = -(2.0f * primitive.explicit_coeffs[0] * x + 
+                             primitive.explicit_coeffs[1] * y + 
+                             primitive.explicit_coeffs[3]);
+                float ny = -(primitive.explicit_coeffs[1] * x + 
+                             2.0f * primitive.explicit_coeffs[2] * y + 
+                             primitive.explicit_coeffs[4]);
+                float nz = 1.0f;
+                float norm = sqrtf(nx*nx + ny*ny + nz*nz);
+                nx /= norm; ny /= norm; nz /= norm;
+                
+                // 变换回全局坐标系
+                GPUPoint3f local_vertex = {x, y, z};
+                GPUPoint3f global_vertex = transformToGlobal(local_vertex, primitive.transform);
+                
+                geometry_msgs::Point v;
+                v.x = global_vertex.x;
+                v.y = global_vertex.y;
+                v.z = global_vertex.z;
+                triangle_vertices.push_back(v);
+                
+                // 法向量也需要变换到全局坐标系
+                // 对应 .cu 中的 T[i*4 + j] 存储方式
+                float R[9] = {primitive.transform[0], primitive.transform[1], primitive.transform[2],  // Row 0
+                             primitive.transform[4], primitive.transform[5], primitive.transform[6],  // Row 1
+                             primitive.transform[8], primitive.transform[9], primitive.transform[10]}; // Row 2
+                geometry_msgs::Point n;
+                n.x = R[0]*nx + R[1]*ny + R[2]*nz;
+                n.y = R[3]*nx + R[4]*ny + R[5]*nz;
+                n.z = R[6]*nx + R[7]*ny + R[8]*nz;
+                triangle_normals.push_back(n);
+                
+                grid_indices[i][j] = vertex_count++;
+            } else {
+                points_out_hull++;
+            }
+        }
+    }
+    
+    ROS_INFO("[computeVisualizationMarkers] 网格点统计: 总网格点数=%d, 在凸包内=%d, 在凸包外=%d, 生成顶点数=%d",
+             grid_width * grid_height, points_in_hull, points_out_hull, vertex_count);
+    
+    // ========================================
+    // 5. 生成三角形（每个网格单元2个三角形）
+    // ========================================
+    visualization_msgs::Marker marker;
+    marker.header = header;
+    marker.ns = "quadric_surfaces";
+    marker.id = static_cast<int>(marker_array.markers.size());
+    marker.type = visualization_msgs::Marker::TRIANGLE_LIST;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 1.0;
+    marker.scale.y = 1.0;
+    marker.scale.z = 1.0;
+    marker.color.r = 0.0f;
+    marker.color.g = 0.5f;
+    marker.color.b = 1.0f;
+    marker.color.a = alpha;
+    
+    // 生成三角形
+    int triangles_generated = 0;
+    for (int i = 0; i < grid_height - 1; ++i) {
+        for (int j = 0; j < grid_width - 1; ++j) {
+            int idx00 = grid_indices[i][j];
+            int idx01 = grid_indices[i][j+1];
+            int idx10 = grid_indices[i+1][j];
+            int idx11 = grid_indices[i+1][j+1];
+            
+            // 检查四个顶点是否都在凸包内
+            if (idx00 >= 0 && idx01 >= 0 && idx10 >= 0) {
+                // 第一个三角形
+                marker.points.push_back(triangle_vertices[idx00]);
+                marker.points.push_back(triangle_vertices[idx01]);
+                marker.points.push_back(triangle_vertices[idx10]);
+                triangles_generated++;
+            }
+            
+            if (idx01 >= 0 && idx10 >= 0 && idx11 >= 0) {
+                // 第二个三角形
+                marker.points.push_back(triangle_vertices[idx01]);
+                marker.points.push_back(triangle_vertices[idx11]);
+                marker.points.push_back(triangle_vertices[idx10]);
+                triangles_generated++;
+            }
+        }
+    }
+    
+    ROS_INFO("[computeVisualizationMarkers] 三角形生成: 生成了 %d 个三角形, marker包含 %zu 个顶点", 
+             triangles_generated, marker.points.size());
+    
+    if (!marker.points.empty()) {
+        marker_array.markers.push_back(marker);
+        ROS_INFO("[computeVisualizationMarkers] ✓ 成功生成marker，包含 %zu 个顶点", marker.points.size());
+    } else {
+        ROS_WARN("[computeVisualizationMarkers] ✗ 生成的marker为空（没有顶点），可能原因：1) 网格步长太大 2) 没有网格点在凸包内 3) 三角形生成失败");
+    }
+}

@@ -71,6 +71,7 @@ private:
     ros::Publisher plane_marker_pub_;      // 平面可视化
     ros::Publisher convex_hull_marker_pub_;  // 凸包可视化
     ros::Publisher result_cloud_pub_;      // 最终结果点云
+    ros::Publisher quadric_marker_pub_;    // 🆕 二次曲面可视化
 
     std::unique_ptr<PlaneDetect<pcl::PointXYZI>> plane_detector_;
     DetectorParams detector_params_;
@@ -104,6 +105,9 @@ private:
     bool plane_clip_to_hull_ = true;             // 是否裁剪到内点凸包
     double plane_hull_padding_ = 0.02;           // 凸包外扩（米）
     double plane_hull_smooth_factor_ = 0.15;     // 轻度平滑 [0,1]
+    
+    // 🆕 二次曲面可视化参数
+    bool enable_quadric_visualization_ = true;   // 是否启用二次曲面可视化
 
     // 离群点移除参数
     bool enable_outlier_removal_;
@@ -164,6 +168,7 @@ private:
     pnh_.param("enable_visualization", enable_visualization_, enable_visualization_);
     pnh_.param("enable_plane_visualization", enable_plane_visualization_, enable_plane_visualization_);
     pnh_.param("enable_convex_hull_visualization", enable_convex_hull_visualization_, enable_convex_hull_visualization_);
+    pnh_.param("enable_quadric_visualization", enable_quadric_visualization_, enable_quadric_visualization_);  // 🆕
 
         // 二次曲面检测参数
         pnh_.param("quadric_min_remaining_points_percentage", quadric_params_.min_remaining_points_percentage, 0.03);
@@ -271,6 +276,9 @@ private:
         
         // 发布凸包可视化
         convex_hull_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("convex_hull_markers", 1, true);
+        
+        // 🆕 发布二次曲面可视化
+        quadric_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("quadric_markers", 1, true);
         
         // 发布最终结果点云
         result_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("remaining_cloud", 1, true);
@@ -518,6 +526,55 @@ private:
                 if (quadric_inlier_time > 1.0f) {
                     ROS_INFO("    [WARNING] 访问内点数据耗时: %.2f ms (可能触发GPU->CPU传输)", quadric_inlier_time);
                 }
+            }
+            
+            // 🆕 二次曲面可视化
+            if (enable_visualization_ && enable_quadric_visualization_) {
+                ROS_INFO("[Quadric Visualization] 开始生成可视化Marker...");
+                ROS_INFO("[Quadric Visualization] enable_visualization_=%d, enable_quadric_visualization_=%d", 
+                         enable_visualization_, enable_quadric_visualization_);
+                ROS_INFO("[Quadric Visualization] 检测到的二次曲面数量: %zu", detected_quadrics.size());
+                
+                visualization_msgs::MarkerArray quadric_markers;
+                int quadrics_with_data = 0;
+                int quadrics_without_data = 0;
+                
+                for (size_t i = 0; i < detected_quadrics.size(); ++i) {
+                    const auto &quadric = detected_quadrics[i];
+                    ROS_INFO("[Quadric Visualization] 二次曲面 %zu: has_visualization_data=%d, inliers=%zu", 
+                             i+1, quadric.has_visualization_data, quadric.inliers ? quadric.inliers->size() : 0);
+                    
+                    if (quadric.has_visualization_data) {
+                        quadrics_with_data++;
+                        size_t markers_before = quadric_markers.markers.size();
+                        quadric_detector_->computeVisualizationMarkers(
+                            quadric, quadric_markers, msg->header,
+                            plane_grid_size_ * 0.01f,  // grid_step (从yaml读取，转换为米)
+                            static_cast<float>(plane_alpha_),  // alpha
+                            plane_clip_to_hull_);      // clip_to_hull
+                        size_t markers_after = quadric_markers.markers.size();
+                        ROS_INFO("[Quadric Visualization] 二次曲面 %zu 生成了 %zu 个markers", 
+                                 i+1, markers_after - markers_before);
+                    } else {
+                        quadrics_without_data++;
+                        ROS_WARN("[Quadric Visualization] 二次曲面 %zu 没有可视化数据（has_visualization_data=false）", i+1);
+                    }
+                }
+                
+                ROS_INFO("[Quadric Visualization] 有可视化数据的二次曲面: %d, 无可视化数据: %d", 
+                         quadrics_with_data, quadrics_without_data);
+                ROS_INFO("[Quadric Visualization] 总共生成了 %zu 个markers", quadric_markers.markers.size());
+                
+                if (!quadric_markers.markers.empty()) {
+                    quadric_marker_pub_.publish(quadric_markers);
+                    ROS_INFO("[Quadric Visualization] ✓ 已发布 %zu 个quadric markers到话题 /quadric_markers", 
+                             quadric_markers.markers.size());
+                } else {
+                    ROS_WARN("[Quadric Visualization] ✗ 没有生成任何markers，不会发布消息");
+                }
+            } else {
+                ROS_WARN("[Quadric Visualization] 可视化被禁用: enable_visualization_=%d, enable_quadric_visualization_=%d", 
+                         enable_visualization_, enable_quadric_visualization_);
             }
             auto quadric_log_end = std::chrono::high_resolution_clock::now();
             quadric_log_time = std::chrono::duration<float, std::milli>(quadric_log_end - quadric_log_start).count();

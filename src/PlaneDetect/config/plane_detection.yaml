@@ -47,13 +47,13 @@ enable_supervoxel: false # 是否启用超体素处理（默认关闭，测试�
 min_remaining_points_for_supervoxel: 5000 # 最小点数阈值
 
 # ========== Visualization Toggles ==========
-enable_visualization: false
+enable_visualization: true
 enable_plane_visualization: true
 enable_convex_hull_visualization: true
 enable_quadric_visualization: true
 
 # ========== Quadric Detection ==========
-enable_quadric: false # 是否启用二次曲面检测
+enable_quadric: true # 是否启用二次曲面检测
 min_remaining_points_for_quadric: 10000 # 二次曲面检测的最小点数阈值
 
 # QuadricDetect算法参数
@@ -62,7 +62,7 @@ quadric_distance_threshold: 0.15 # 二次曲面内点距离阈值 (m)
 min_quadric_inlier_count_absolute: 3000 # 有效模型的最小内点数(绝对值)
 quadric_max_iterations: 300 # RANSAC最大迭代次数（降低负载）
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
-quadric_verbosity: 2 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+quadric_verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
 
 # Supervoxel算法参数
 sv_voxel_resolution: 0.2 # 体素分辨率 (m)
