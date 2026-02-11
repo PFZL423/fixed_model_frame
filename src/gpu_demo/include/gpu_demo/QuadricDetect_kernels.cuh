@@ -24,15 +24,16 @@ __global__ void initSequenceKernel(int *indices, int n);
 __global__ void initCurandStates_Kernel(curandState *states, unsigned long seed, int n);
 
 /**
- * @brief 批量采样和矩阵构建内核 - 核心创新
- * 每个GPU线程并行采样9个点并构建对应的9×10约束矩阵A
+ * @brief 批量采样和PCA局部坐标系构建内核 - 核心创新
+ * 每个GPU线程并行采样6个点，计算PCA局部坐标系（R和p），并填充占位Q矩阵
  * 相比point包的CPU串行采样，实现~100x加速
  * @param all_points 所有点云数据 (GPU)
  * @param remaining_indices 剩余点索引 (GPU)
  * @param num_remaining 剩余点数量
  * @param rand_states GPU随机数状态
  * @param batch_size 并行处理的模型数量 (通常1024)
- * @param batch_matrices [out] 输出的批量矩阵 (batch_size × 9 × 10)
+ * @param batch_matrices [out] 批量矩阵缓冲区（暂时保留，后续移除）
+ * @param batch_models [out] 输出的批量模型 (batch_size个GPUQuadricModel，填充占位Q矩阵)
  */
 __global__ void sampleAndBuildMatrices_Kernel(
     const GPUPoint3f *all_points,
@@ -40,7 +41,8 @@ __global__ void sampleAndBuildMatrices_Kernel(
     int num_remaining,
     curandState *rand_states,
     int batch_size,
-    float *batch_matrices);
+    float *batch_matrices,
+    GPUQuadricModel *batch_models);
 
 /**
  * @brief 批量内点计数内核 - 2D并行验证（粗筛阶段，支持子采样）

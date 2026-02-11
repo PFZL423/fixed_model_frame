@@ -64,13 +64,330 @@ __global__ void debugRandomStates_Kernel(const curandState *rand_states, int n, 
     }
 }
 
+// ========================================
+// PCA局部坐标系构建辅助函数
+// ========================================
+
+/**
+ * @brief 使用卡尔丹公式求解3×3对称矩阵的特征值
+ * @param C 3×3对称矩阵（9个float，行主序存储）
+ * @param eigenvalues [out] 3个特征值（按从小到大排序）
+ */
+__device__ void solveCubicEigenvalues(const float *C, float *eigenvalues)
+{
+    // 对于3×3对称矩阵C，特征多项式为 det(C - λI) = -λ³ + trace(C)λ² - ... + det(C) = 0
+    // 转换为标准形式：λ³ + aλ² + bλ + c = 0
+    // 其中 a = -trace(C), b = (trace(C)² - trace(C²))/2, c = -det(C)
+    
+    float trace_C = C[0] + C[4] + C[8]; // C[0,0] + C[1,1] + C[2,2]
+    
+    // 计算C²的迹
+    float trace_C2 = C[0]*C[0] + C[1]*C[3] + C[2]*C[6] +  // 第一行
+                     C[3]*C[1] + C[4]*C[4] + C[5]*C[7] +  // 第二行
+                     C[6]*C[2] + C[7]*C[5] + C[8]*C[8];   // 第三行
+    
+    // 计算行列式 det(C)
+    float det_C = C[0] * (C[4]*C[8] - C[5]*C[7]) -
+                  C[1] * (C[3]*C[8] - C[5]*C[6]) +
+                  C[2] * (C[3]*C[7] - C[4]*C[6]);
+    
+    // 特征多项式系数
+    float a = -trace_C;
+    float b = (trace_C * trace_C - trace_C2) * 0.5f;
+    float c = -det_C;
+    
+    // 卡尔丹公式：将 λ³ + aλ² + bλ + c = 0 转换为 t³ + pt + q = 0
+    // 其中 t = λ + a/3
+    float p = b - a * a / 3.0f;
+    float q = (2.0f * a * a * a) / 27.0f - (a * b) / 3.0f + c;
+    
+    // 判别式 Δ = (q/2)² + (p/3)³
+    float delta = (q * q) / 4.0f + (p * p * p) / 27.0f;
+    
+    float sqrt_delta = sqrtf(fabsf(delta));
+    
+    if (delta >= 0.0f)
+    {
+        // 一个实根和两个共轭复根（退化情况，取实根）
+        float u = cbrtf(-q / 2.0f + sqrt_delta);
+        float v = cbrtf(-q / 2.0f - sqrt_delta);
+        float t1 = u + v;
+        
+        // 转换回λ
+        eigenvalues[0] = t1 - a / 3.0f;
+        eigenvalues[1] = eigenvalues[0]; // 重复根
+        eigenvalues[2] = eigenvalues[0];
+    }
+    else
+    {
+        // 三个不同的实根
+        float rho = sqrtf(-p * p * p / 27.0f);
+        float theta = acosf(-q / (2.0f * rho));
+        
+        float t1 = 2.0f * cbrtf(rho) * cosf(theta / 3.0f);
+        float t2 = 2.0f * cbrtf(rho) * cosf((theta + 2.0f * 3.14159265359f) / 3.0f);
+        float t3 = 2.0f * cbrtf(rho) * cosf((theta + 4.0f * 3.14159265359f) / 3.0f);
+        
+        // 转换回λ并排序
+        eigenvalues[0] = t1 - a / 3.0f;
+        eigenvalues[1] = t2 - a / 3.0f;
+        eigenvalues[2] = t3 - a / 3.0f;
+        
+        // 简单排序（冒泡排序）
+        if (eigenvalues[0] > eigenvalues[1]) { float tmp = eigenvalues[0]; eigenvalues[0] = eigenvalues[1]; eigenvalues[1] = tmp; }
+        if (eigenvalues[1] > eigenvalues[2]) { float tmp = eigenvalues[1]; eigenvalues[1] = eigenvalues[2]; eigenvalues[2] = tmp; }
+        if (eigenvalues[0] > eigenvalues[1]) { float tmp = eigenvalues[0]; eigenvalues[0] = eigenvalues[1]; eigenvalues[1] = tmp; }
+    }
+}
+
+/**
+ * @brief 计算最小特征值对应的特征向量（通过列向量叉乘）
+ * @param C 3×3对称矩阵（9个float，行主序存储）
+ * @param lambda_min 最小特征值
+ * @param eigenvector [out] 归一化的特征向量（3个float）
+ */
+__device__ void computeEigenvector(const float *C, float lambda_min, float *eigenvector)
+{
+    // 构造 (C - λ_min*I)
+    float C_minus_lambda[9];
+    for (int i = 0; i < 9; ++i)
+    {
+        C_minus_lambda[i] = C[i];
+    }
+    C_minus_lambda[0] -= lambda_min; // C[0,0] - λ
+    C_minus_lambda[4] -= lambda_min; // C[1,1] - λ
+    C_minus_lambda[8] -= lambda_min; // C[2,2] - λ
+    
+    // 方法：使用列向量叉乘
+    // 取C - λI的前两列，叉乘得到特征向量
+    float col0[3] = {C_minus_lambda[0], C_minus_lambda[3], C_minus_lambda[6]}; // 第0列
+    float col1[3] = {C_minus_lambda[1], C_minus_lambda[4], C_minus_lambda[7]}; // 第1列
+    
+    // 叉乘：eigenvector = col0 × col1
+    eigenvector[0] = col0[1] * col1[2] - col0[2] * col1[1];
+    eigenvector[1] = col0[2] * col1[0] - col0[0] * col1[2];
+    eigenvector[2] = col0[0] * col1[1] - col0[1] * col1[0];
+    
+    // 归一化
+    float norm = sqrtf(eigenvector[0]*eigenvector[0] + eigenvector[1]*eigenvector[1] + eigenvector[2]*eigenvector[2]);
+    
+    if (norm < 1e-6f)
+    {
+        // 如果叉乘结果为零向量（退化情况），使用默认方向
+        eigenvector[0] = 0.0f;
+        eigenvector[1] = 0.0f;
+        eigenvector[2] = 1.0f;
+    }
+    else
+    {
+        float inv_norm = 1.0f / norm;
+        eigenvector[0] *= inv_norm;
+        eigenvector[1] *= inv_norm;
+        eigenvector[2] *= inv_norm;
+    }
+}
+
+// ========================================
+// 6×6方程组求解与Q矩阵变换辅助函数
+// ========================================
+
+/**
+ * @brief 使用高斯消元法求解6×6线性方程组 M * x = b
+ * @param M 6×6设计矩阵（36个float，行主序存储）
+ * @param b 6×1目标向量（6个float）
+ * @param x [out] 6×1解向量（6个float，存储a,b,c,d,e,f）
+ * @return true表示求解成功，false表示矩阵奇异
+ */
+__device__ bool solve6x6GaussElimination(const float *M, const float *b, float *x)
+{
+    // 创建增广矩阵 [M | b]，大小为6×7
+    float aug[6][7];
+    for (int i = 0; i < 6; ++i)
+    {
+        for (int j = 0; j < 6; ++j)
+        {
+            aug[i][j] = M[i*6 + j];
+        }
+        aug[i][6] = b[i];
+    }
+    
+    // 前向消元（高斯消元）
+    for (int col = 0; col < 6; ++col)
+    {
+        // 找主元（列主元）
+        int max_row = col;
+        float max_val = fabsf(aug[col][col]);
+        for (int row = col + 1; row < 6; ++row)
+        {
+            if (fabsf(aug[row][col]) > max_val)
+            {
+                max_val = fabsf(aug[row][col]);
+                max_row = row;
+            }
+        }
+        
+        // 交换行
+        if (max_row != col)
+        {
+            for (int j = col; j < 7; ++j)
+            {
+                float tmp = aug[col][j];
+                aug[col][j] = aug[max_row][j];
+                aug[max_row][j] = tmp;
+            }
+        }
+        
+        // 检查主元是否为零（奇异矩阵）
+        if (fabsf(aug[col][col]) < 1e-6f)
+        {
+            return false; // 矩阵奇异，求解失败
+        }
+        
+        // 消元
+        float pivot = aug[col][col];
+        for (int row = col + 1; row < 6; ++row)
+        {
+            float factor = aug[row][col] / pivot;
+            for (int j = col; j < 7; ++j)
+            {
+                aug[row][j] -= factor * aug[col][j];
+            }
+        }
+    }
+    
+    // 回代求解
+    for (int i = 5; i >= 0; --i)
+    {
+        x[i] = aug[i][6];
+        for (int j = i + 1; j < 6; ++j)
+        {
+            x[i] -= aug[i][j] * x[j];
+        }
+        x[i] /= aug[i][i];
+    }
+    
+    return true;
+}
+
+/**
+ * @brief 构造4×4齐次变换矩阵T = [[R, p], [0, 0, 0, 1]]
+ * @param X X轴向量（3个float）
+ * @param Y Y轴向量（3个float）
+ * @param Z Z轴向量（3个float）
+ * @param p 3×1平移向量（质心）
+ * @param T [out] 4×4齐次变换矩阵（行主序存储）
+ */
+__device__ void constructHomogeneousTransform(
+    const float *X, const float *Y, const float *Z,
+    const GPUPoint3f &p,
+    float *T)
+{
+    // T = [[R, p], [0, 0, 0, 1]]
+    // 行主序存储：T[i*4+j] = T(i,j)
+    // R = [X | Y | Z]（列主序），所以R的行是X、Y、Z的分量
+    
+    // 第0行：[X[0], Y[0], Z[0], p.x]
+    T[0] = X[0]; T[1] = Y[0]; T[2] = Z[0]; T[3] = p.x;
+    // 第1行：[X[1], Y[1], Z[1], p.y]
+    T[4] = X[1]; T[5] = Y[1]; T[6] = Z[1]; T[7] = p.y;
+    // 第2行：[X[2], Y[2], Z[2], p.z]
+    T[8] = X[2]; T[9] = Y[2]; T[10] = Z[2]; T[11] = p.z;
+    // 第3行：[0, 0, 0, 1]
+    T[12] = 0.0f; T[13] = 0.0f; T[14] = 0.0f; T[15] = 1.0f;
+}
+
+/**
+ * @brief 计算4×4齐次变换矩阵的逆：T^-1
+ * 对于 T = [[R, p], [0, 1]]，有 T^-1 = [[R^T, -R^T*p], [0, 1]]
+ * @param T 4×4齐次变换矩阵（行主序）
+ * @param T_inv [out] 4×4逆矩阵（行主序）
+ */
+__device__ void invertHomogeneousTransform(const float *T, float *T_inv)
+{
+    // 提取R和p
+    // T的前3行前3列是R（行主序），第4列是p
+    float R[9]; // 3×3旋转矩阵，行主序
+    float p[3];
+    R[0] = T[0]; R[1] = T[1]; R[2] = T[2];   // 第0行
+    R[3] = T[4]; R[4] = T[5]; R[5] = T[6];   // 第1行
+    R[6] = T[8]; R[7] = T[9]; R[8] = T[10];  // 第2行
+    p[0] = T[3]; p[1] = T[7]; p[2] = T[11];
+    
+    // R^T（转置）
+    float RT[9];
+    RT[0] = R[0]; RT[1] = R[3]; RT[2] = R[6]; // 第0行 = R的第0列
+    RT[3] = R[1]; RT[4] = R[4]; RT[5] = R[7]; // 第1行 = R的第1列
+    RT[6] = R[2]; RT[7] = R[5]; RT[8] = R[8]; // 第2行 = R的第2列
+    
+    // -R^T * p
+    float neg_RT_p[3];
+    neg_RT_p[0] = -(RT[0]*p[0] + RT[1]*p[1] + RT[2]*p[2]);
+    neg_RT_p[1] = -(RT[3]*p[0] + RT[4]*p[1] + RT[5]*p[2]);
+    neg_RT_p[2] = -(RT[6]*p[0] + RT[7]*p[1] + RT[8]*p[2]);
+    
+    // T^-1 = [[R^T, -R^T*p], [0, 1]]
+    T_inv[0] = RT[0]; T_inv[1] = RT[1]; T_inv[2] = RT[2]; T_inv[3] = neg_RT_p[0];
+    T_inv[4] = RT[3]; T_inv[5] = RT[4]; T_inv[6] = RT[5]; T_inv[7] = neg_RT_p[1];
+    T_inv[8] = RT[6]; T_inv[9] = RT[7]; T_inv[10] = RT[8]; T_inv[11] = neg_RT_p[2];
+    T_inv[12] = 0.0f; T_inv[13] = 0.0f; T_inv[14] = 0.0f; T_inv[15] = 1.0f;
+}
+
+/**
+ * @brief 计算 Qglobal = (T^-1)^T * Qlocal * T^-1
+ * @param T_inv 4×4逆变换矩阵（行主序）
+ * @param Qlocal 4×4局部Q矩阵（行主序）
+ * @param Qglobal [out] 4×4全局Q矩阵（行主序）
+ */
+__device__ void transformQuadricMatrix(const float *T_inv, const float *Qlocal, float *Qglobal)
+{
+    // 计算中间结果：Qtemp = Qlocal * T^-1
+    float Qtemp[16];
+    for (int i = 0; i < 4; ++i)
+    {
+        for (int j = 0; j < 4; ++j)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+                sum += Qlocal[i*4 + k] * T_inv[k*4 + j];
+            }
+            Qtemp[i*4 + j] = sum;
+        }
+    }
+    
+    // 计算 Qglobal = (T^-1)^T * Qtemp
+    // (T^-1)^T的行是T^-1的列
+    float T_inv_T[16]; // (T^-1)^T，行主序
+    for (int i = 0; i < 4; ++i)
+    {
+        for (int j = 0; j < 4; ++j)
+        {
+            T_inv_T[i*4 + j] = T_inv[j*4 + i]; // 转置
+        }
+    }
+    
+    for (int i = 0; i < 4; ++i)
+    {
+        for (int j = 0; j < 4; ++j)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+                sum += T_inv_T[i*4 + k] * Qtemp[k*4 + j];
+            }
+            Qglobal[i*4 + j] = sum;
+        }
+    }
+}
+
 __global__ void sampleAndBuildMatrices_Kernel(
     const GPUPoint3f *all_points,
     const int *remaining_indices,
     int num_remaining,
     curandState *rand_states,
     int batch_size,
-    float *batch_matrices)
+    float *batch_matrices,
+    GPUQuadricModel *batch_models)
 {
     int model_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (model_id >= batch_size)
@@ -78,52 +395,268 @@ __global__ void sampleAndBuildMatrices_Kernel(
 
     curandState local_state = rand_states[model_id];
 
-    // 采样9个点
-    int sample_indices[9];
-    for (int i = 0; i < 9; ++i)
+    // 采样6个点
+    int sample_indices[6];
+    for (int i = 0; i < 6; ++i)
     {
         sample_indices[i] = remaining_indices[curand(&local_state) % num_remaining];
     }
 
-    // 构造9x10的A矩阵 ( 修复：按列主序存储，符合cuSolver要求)
-    float *A = &batch_matrices[model_id * 90]; // 9*10
+    // 调试输出：打印前3个模型的采样点
+    if (model_id < 3)
+    {
+        printf("模型 %d 采样点: ", model_id);
+        for (int i = 0; i < 6; ++i)
+        {
+            GPUPoint3f pt = all_points[sample_indices[i]];
+            printf("点%d=(%.3f,%.3f,%.3f) ", i, pt.x, pt.y, pt.z);
+        }
+        printf("\n");
+    }
 
-    for (int i = 0; i < 9; ++i)
+    // ========================================
+    // PCA局部坐标系构建
+    // ========================================
+    
+    // 2.1 计算质心p
+    GPUPoint3f centroid = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 6; ++i)
     {
         GPUPoint3f pt = all_points[sample_indices[i]];
-        float x = pt.x, y = pt.y, z = pt.z;
-
-        //  关键修复：检查并处理无效的点云数据
-        if (!isfinite(x) || !isfinite(y) || !isfinite(z) ||
-            isnan(x) || isnan(y) || isnan(z) ||
-            isinf(x) || isinf(y) || isinf(z))
+        // 检查无效点
+        if (!isfinite(pt.x) || !isfinite(pt.y) || !isfinite(pt.z) ||
+            isnan(pt.x) || isnan(pt.y) || isnan(pt.z) ||
+            isinf(pt.x) || isinf(pt.y) || isinf(pt.z))
         {
-            //  发现无效点，用默认值替换
-            x = 0.0f;
-            y = 0.0f;
-            z = 0.0f;
+            continue; // 跳过无效点
         }
-
-        //  关键修复：列主序存储 A[col * m + row]
-        A[0 * 9 + i] = x * x; // x² (第0列)
-        A[1 * 9 + i] = y * y; // y² (第1列)
-        A[2 * 9 + i] = z * z; // z² (第2列)
-        A[3 * 9 + i] = x * y; // xy (第3列)
-        A[4 * 9 + i] = x * z; // xz (第4列)
-        A[5 * 9 + i] = y * z; // yz (第5列)
-        A[6 * 9 + i] = x;     // x  (第6列)
-        A[7 * 9 + i] = y;     // y  (第7列)
-        A[8 * 9 + i] = z;     // z  (第8列)
-        A[9 * 9 + i] = 1.0f;  // 常数项 (第9列)
-
-        //  二次验证：确保生成的值都是有效的
-        for (int col = 0; col < 10; ++col)
+        centroid.x += pt.x;
+        centroid.y += pt.y;
+        centroid.z += pt.z;
+    }
+    centroid.x /= 6.0f;
+    centroid.y /= 6.0f;
+    centroid.z /= 6.0f;
+    
+    // 2.2 计算3×3协方差矩阵C
+    float C[9] = {0.0f}; // 3×3矩阵，按行主序存储
+    int valid_count = 0;
+    for (int i = 0; i < 6; ++i)
+    {
+        GPUPoint3f pt = all_points[sample_indices[i]];
+        if (!isfinite(pt.x) || !isfinite(pt.y) || !isfinite(pt.z) ||
+            isnan(pt.x) || isnan(pt.y) || isnan(pt.z) ||
+            isinf(pt.x) || isinf(pt.y) || isinf(pt.z))
         {
-            float val = A[col * 9 + i];
-            if (!isfinite(val) || isnan(val) || isinf(val))
-            {
-                A[col * 9 + i] = (col == 9) ? 1.0f : 0.0f; // 常数项设为1，其他设为0
-            }
+            continue; // 跳过无效点
+        }
+        valid_count++;
+        float dx = pt.x - centroid.x;
+        float dy = pt.y - centroid.y;
+        float dz = pt.z - centroid.z;
+        // C = sum((p - centroid) * (p - centroid)^T)
+        C[0] += dx * dx; // C[0,0]
+        C[1] += dx * dy; // C[0,1]
+        C[2] += dx * dz; // C[0,2]
+        C[3] += dy * dx; // C[1,0]
+        C[4] += dy * dy; // C[1,1]
+        C[5] += dy * dz; // C[1,2]
+        C[6] += dz * dx; // C[2,0]
+        C[7] += dz * dy; // C[2,1]
+        C[8] += dz * dz; // C[2,2]
+    }
+    
+    // 除以(n-1) = 5（如果valid_count < 2，使用valid_count-1）
+    float inv_n_minus_1 = (valid_count > 1) ? (1.0f / (valid_count - 1.0f)) : 1.0f;
+    for (int i = 0; i < 9; ++i)
+    {
+        C[i] *= inv_n_minus_1;
+    }
+    
+    // 2.3 使用卡尔丹解析解求特征值
+    float eigenvalues[3];
+    solveCubicEigenvalues(C, eigenvalues);
+    float lambda_min = eigenvalues[0]; // 最小特征值
+    
+    // 2.4 提取最小特征值对应的特征向量n
+    float n[3]; // 归一化的特征向量（作为Z轴）
+    computeEigenvector(C, lambda_min, n);
+    
+    // 2.5 构造正交矩阵R
+    // Z轴 = n（最小特征值对应的特征向量）
+    float Z[3] = {n[0], n[1], n[2]};
+    
+    // X轴：选择与Z轴垂直的向量
+    float X[3];
+    if (fabsf(Z[0]) < 0.9f)
+    {
+        // 使用[1,0,0]投影到垂直于Z的平面
+        float dot = Z[0];
+        X[0] = 1.0f - dot * Z[0];
+        X[1] = -dot * Z[1];
+        X[2] = -dot * Z[2];
+    }
+    else
+    {
+        // 使用[0,1,0]投影
+        float dot = Z[1];
+        X[0] = -dot * Z[0];
+        X[1] = 1.0f - dot * Z[1];
+        X[2] = -dot * Z[2];
+    }
+    // 归一化X
+    float norm_x = sqrtf(X[0]*X[0] + X[1]*X[1] + X[2]*X[2]);
+    if (norm_x > 1e-6f)
+    {
+        float inv_norm_x = 1.0f / norm_x;
+        X[0] *= inv_norm_x;
+        X[1] *= inv_norm_x;
+        X[2] *= inv_norm_x;
+    }
+    else
+    {
+        // 退化情况：使用默认X轴
+        X[0] = 1.0f;
+        X[1] = 0.0f;
+        X[2] = 0.0f;
+    }
+    
+    // Y轴 = Z × X（叉乘）
+    float Y[3];
+    Y[0] = Z[1] * X[2] - Z[2] * X[1];
+    Y[1] = Z[2] * X[0] - Z[0] * X[2];
+    Y[2] = Z[0] * X[1] - Z[1] * X[0];
+    // 归一化Y
+    float norm_y = sqrtf(Y[0]*Y[0] + Y[1]*Y[1] + Y[2]*Y[2]);
+    if (norm_y > 1e-6f)
+    {
+        float inv_norm_y = 1.0f / norm_y;
+        Y[0] *= inv_norm_y;
+        Y[1] *= inv_norm_y;
+        Y[2] *= inv_norm_y;
+    }
+    
+    // 旋转矩阵R = [X | Y | Z]（3×3，列主序）
+    // 注意：R和p作为局部变量，不写入全局内存
+    
+    // ========================================
+    // 第二阶段：坐标系对齐与6×6方程组求解
+    // ========================================
+    
+    // 1. 坐标系对齐：将6个全局点映射到局部坐标系 Plocal = R^T(Pglobal - p)
+    GPUPoint3f local_points[6];
+    for (int i = 0; i < 6; ++i)
+    {
+        GPUPoint3f pt_global = all_points[sample_indices[i]];
+        // P - p
+        float dx = pt_global.x - centroid.x;
+        float dy = pt_global.y - centroid.y;
+        float dz = pt_global.z - centroid.z;
+        // R^T * (P - p)，其中R = [X | Y | Z]（列主序）
+        // R^T的行是X、Y、Z（转置后）
+        local_points[i].x = X[0]*dx + X[1]*dy + X[2]*dz;  // X^T * (P-p)
+        local_points[i].y = Y[0]*dx + Y[1]*dy + Y[2]*dz;  // Y^T * (P-p)
+        local_points[i].z = Z[0]*dx + Z[1]*dy + Z[2]*dz;  // Z^T * (P-p)
+    }
+    
+    // 2. 构建6×6设计矩阵M：每一行是 [xi², xiyi, yi², xi, yi, 1]
+    float M[36]; // 6×6矩阵，行主序
+    float z_vec[6]; // 目标向量：6个点的局部z坐标
+    
+    for (int i = 0; i < 6; ++i)
+    {
+        float x = local_points[i].x;
+        float y = local_points[i].y;
+        float z = local_points[i].z;
+        
+        // 第i行
+        M[i*6 + 0] = x * x;      // xi²
+        M[i*6 + 1] = x * y;      // xiyi
+        M[i*6 + 2] = y * y;      // yi²
+        M[i*6 + 3] = x;          // xi
+        M[i*6 + 4] = y;          // yi
+        M[i*6 + 5] = 1.0f;       // 1
+        
+        z_vec[i] = z;            // 目标值
+    }
+    
+    // 3. 求解6×6方程组：M * [a, b, c, d, e, f]^T = z_vec
+    float coeffs_local[6]; // [a, b, c, d, e, f]
+    bool solve_success = solve6x6GaussElimination(M, z_vec, coeffs_local);
+    
+    // 4. 构造Qlocal并转换到Qglobal
+    GPUQuadricModel *model = &batch_models[model_id];
+    
+    if (!solve_success)
+    {
+        // 求解失败，使用占位Q矩阵（z=0平面）
+        // z=0平面对应的10维系数：[0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+        // 映射到4×4对称矩阵Q（行主序存储到coeffs[16]）
+        model->coeffs[0] = 0.0f;   // Q(0,0) = A = 0
+        model->coeffs[1] = 0.0f;   // Q(0,1) = D = 0
+        model->coeffs[2] = 0.0f;   // Q(0,2) = E = 0
+        model->coeffs[3] = 0.0f;   // Q(0,3) = G = 0
+        model->coeffs[4] = 0.0f;   // Q(1,0) = D = 0
+        model->coeffs[5] = 0.0f;   // Q(1,1) = B = 0
+        model->coeffs[6] = 0.0f;   // Q(1,2) = F = 0
+        model->coeffs[7] = 0.0f;   // Q(1,3) = H = 0
+        model->coeffs[8] = 0.0f;   // Q(2,0) = E = 0
+        model->coeffs[9] = 0.0f;   // Q(2,1) = F = 0
+        model->coeffs[10] = 0.0f;  // Q(2,2) = 0 【修正：z²项系数为0】
+        model->coeffs[11] = 0.5f;  // Q(2,3) = 0.5 【修正：z项系数为1】
+        model->coeffs[12] = 0.0f;  // Q(3,0) = G = 0
+        model->coeffs[13] = 0.0f;  // Q(3,1) = H = 0
+        model->coeffs[14] = 0.0f;  // Q(3,2) = I = 0
+        model->coeffs[15] = 0.0f;  // Q(3,3) = J = 0
+    }
+    else
+    {
+        // 构造Qlocal矩阵（4×4，行主序存储）
+        // Qlocal = [[-a, -b/2, 0, -d/2],
+        //           [-b/2, -c, 0, -e/2],
+        //           [0, 0, 0.5, 0],
+        //           [-d/2, -e/2, 0, -f]]
+        float Qlocal[16];
+        float a = coeffs_local[0];
+        float b = coeffs_local[1];
+        float c = coeffs_local[2];
+        float d = coeffs_local[3];
+        float e = coeffs_local[4];
+        float f = coeffs_local[5];
+        
+        Qlocal[0] = -a;        // Q(0,0)
+        Qlocal[1] = -b * 0.5f; // Q(0,1)
+        Qlocal[2] = 0.0f;      // Q(0,2)
+        Qlocal[3] = -d * 0.5f; // Q(0,3)
+        Qlocal[4] = -b * 0.5f; // Q(1,0) = Q(0,1)
+        Qlocal[5] = -c;        // Q(1,1)
+        Qlocal[6] = 0.0f;      // Q(1,2)
+        Qlocal[7] = -e * 0.5f; // Q(1,3)
+        Qlocal[8] = 0.0f;      // Q(2,0)
+        Qlocal[9] = 0.0f;      // Q(2,1)
+        Qlocal[10] = 0.0f;     // Q(2,2) = 0 【修正：z²项系数为0】
+        Qlocal[11] = 0.5f;     // Q(2,3) = 0.5 【修正：z项系数为1】
+        Qlocal[12] = -d * 0.5f; // Q(3,0) = Q(0,3)
+        Qlocal[13] = -e * 0.5f; // Q(3,1) = Q(1,3)
+        Qlocal[14] = 0.5f;      // Q(3,2) = 0.5 【修正：z项的一半，与Q(2,3)对称】
+        Qlocal[15] = -f;        // Q(3,3)
+        
+        // 构造齐次变换矩阵T
+        float T[16];
+        constructHomogeneousTransform(X, Y, Z, centroid, T);
+        
+        // 计算T^-1
+        float T_inv[16];
+        invertHomogeneousTransform(T, T_inv);
+        
+        // 计算Qglobal = (T^-1)^T * Qlocal * T^-1
+        float Qglobal[16];
+        transformQuadricMatrix(T_inv, Qlocal, Qglobal);
+        
+        // 写入到GPUQuadricModel（行主序）
+        for (int i = 0; i < 16; ++i)
+        {
+            model->coeffs[i] = Qglobal[i];
         }
     }
 
@@ -695,7 +1228,8 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         static_cast<int>(d_remaining_indices_.size()),
         thrust::raw_pointer_cast(d_rand_states_.data()),
         batch_size,
-        thrust::raw_pointer_cast(d_batch_matrices_.data()));
+        thrust::raw_pointer_cast(d_batch_matrices_.data()),
+        thrust::raw_pointer_cast(d_batch_models_.data()));
 
     cudaError_t kernel_error = cudaGetLastError();
     if (kernel_error != cudaSuccess)
@@ -742,59 +1276,41 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         }
     }
     
-    // 调试信息：打印前3个模型采样的点（通过矩阵推断）和随机数状态
+    // 调试信息：采样点已在内核中通过printf输出（仅前3个模型）
     if (params_.verbosity > 1)
     {
-        std::cout << "[launchSampleAndBuildMatrices] 检查前3个模型的采样点..." << std::endl;
-        
-        // 从矩阵中提取采样点的坐标（矩阵的第一行包含第一个采样点的 x², y², z², xy, xz, yz, x, y, z, 1）
-        thrust::host_vector<float> h_matrices_sample(3 * 9 * 10);
-        cudaMemcpy(h_matrices_sample.data(),
-                   thrust::raw_pointer_cast(d_batch_matrices_.data()),
-                   3 * 9 * 10 * sizeof(float),
-                   cudaMemcpyDeviceToHost);
-        
-        for (int model_id = 0; model_id < 3 && model_id < batch_size; ++model_id)
-        {
-            const float* A = &h_matrices_sample[model_id * 90];
-            std::cout << "  模型 " << model_id << " 的采样点（从矩阵推断）:" << std::endl;
-            
-            // 打印所有9个采样点
-            for (int i = 0; i < 9; ++i)
-            {
-                float x = A[6 * 9 + i];
-                float y = A[7 * 9 + i];
-                float z = A[8 * 9 + i];
-                std::cout << "    点[" << i << "]: (" << x << ", " << y << ", " << z << ")" << std::endl;
-            }
-        }
+        std::cout << "[launchSampleAndBuildMatrices] 采样点调试信息已在内核中输出（仅前3个模型）" << std::endl;
     }
 
-    //  验证生成的矩阵数据
+    //  验证生成的模型数据
     if (params_.verbosity > 1)
     {
-        std::cout << "[launchSampleAndBuildMatrices] 验证生成的矩阵..." << std::endl;
+        std::cout << "[launchSampleAndBuildMatrices] 验证生成的模型..." << std::endl;
 
-        // 检查第一个矩阵
-        thrust::host_vector<float> h_first_matrix(9 * 10);
-        cudaMemcpy(h_first_matrix.data(),
-                   thrust::raw_pointer_cast(d_batch_matrices_.data()),
-                   9 * 10 * sizeof(float),
+        // 检查前3个模型的系数
+        thrust::host_vector<GPUQuadricModel> h_models(3);
+        cudaMemcpy(h_models.data(),
+                   thrust::raw_pointer_cast(d_batch_models_.data()),
+                   3 * sizeof(GPUQuadricModel),
                    cudaMemcpyDeviceToHost);
 
         bool all_zero = true;
-        for (int i = 0; i < 9 * 10; ++i)
+        for (int model_id = 0; model_id < 3 && model_id < batch_size; ++model_id)
         {
-            if (h_first_matrix[i] != 0.0f)
+            for (int i = 0; i < 16; ++i)
             {
-                all_zero = false;
-                break;
+                if (fabsf(h_models[model_id].coeffs[i]) > 1e-6f)
+                {
+                    all_zero = false;
+                    break;
+                }
             }
+            if (!all_zero) break;
         }
 
         if (all_zero)
         {
-            std::cerr << "[launchSampleAndBuildMatrices]  生成的矩阵全为零！检查内核实现" << std::endl;
+            std::cerr << "[launchSampleAndBuildMatrices]  生成的模型全为零！检查内核实现" << std::endl;
 
             //  检查输入点云数据
             thrust::host_vector<GPUPoint3f> h_points_sample(std::min(10, static_cast<int>(total_points)));
@@ -826,7 +1342,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         }
         else
         {
-            std::cout << "[launchSampleAndBuildMatrices] ✓ 矩阵生成成功，包含非零数据" << std::endl;
+            std::cout << "[launchSampleAndBuildMatrices] ✓ 模型验证通过，前3个模型的系数非零" << std::endl;
         }
     }
 
@@ -1318,7 +1834,7 @@ void QuadricDetect::launchRemovePointsKernel()
 
 // 1. 计算A^T*A矩阵
 __global__ void computeATA_Kernel(
-    const float *batch_matrices, // 输入：1024个9×10矩阵
+    const float *batch_matrices, // 输入：1024个6×10矩阵（填充为9×10）
     float *batch_ATA_matrices,   // 输出：1024个10×10 A^T*A矩阵
     int batch_size)
 {
@@ -1326,16 +1842,16 @@ __global__ void computeATA_Kernel(
     if (batch_id >= batch_size)
         return;
 
-    const float *A = &batch_matrices[batch_id * 90];  // 9×10矩阵
+    const float *A = &batch_matrices[batch_id * 90];  // 9×10矩阵（内存布局）
     float *ATA = &batch_ATA_matrices[batch_id * 100]; // 10×10矩阵
 
-    // 计算A^T * A
+    // 计算A^T * A（只使用前6行有效数据）
     for (int i = 0; i < 10; ++i)
     {
         for (int j = i; j < 10; ++j)
         { // 只计算上三角，利用对称性
             float sum = 0.0f;
-            for (int k = 0; k < 9; ++k)
+            for (int k = 0; k < 6; ++k)  // 修改：只计算前6行
             {
                 sum += A[i * 9 + k] * A[j * 9 + k]; // A^T[i][k] * A[j][k]
             }

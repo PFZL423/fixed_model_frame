@@ -176,7 +176,6 @@ void QuadricDetect::findQuadrics_BatchGPU()
     }
 
     float total_sampling_time = 0.0f;
-    float total_inverse_power_time = 0.0f;
     float total_inlier_count_time = 0.0f;
     float total_coarse_time = 0.0f;
     float total_topk_time = 0.0f;
@@ -199,29 +198,22 @@ void QuadricDetect::findQuadrics_BatchGPU()
         auto sampling_end = std::chrono::high_resolution_clock::now();
         float sampling_time = std::chrono::duration<float, std::milli>(sampling_end - sampling_start).count();
         total_sampling_time += sampling_time;
-        
-        // Step 3: 批量反幂迭代
-        auto inverse_power_start = std::chrono::high_resolution_clock::now();
-        performBatchInversePowerIteration(batch_size);
-        auto inverse_power_end = std::chrono::high_resolution_clock::now();
-        float inverse_power_time = std::chrono::duration<float, std::milli>(inverse_power_end - inverse_power_start).count();
-        total_inverse_power_time += inverse_power_time;
 
-        // Step 4: 两阶段RANSAC竞速
-        // 4.1 粗筛阶段：对batch_size个模型进行子采样计数（2%采样率）
+        // Step 3: 两阶段RANSAC竞速
+        // 3.1 粗筛阶段：对batch_size个模型进行子采样计数（2%采样率）
         auto inlier_count_start = std::chrono::high_resolution_clock::now();
         const int coarse_stride = 50;  // 2%采样率
         launchCountInliersBatch(batch_size, coarse_stride);  // 粗筛，得到coarse_score
         auto coarse_end = std::chrono::high_resolution_clock::now();
         float coarse_time = std::chrono::duration<float, std::milli>(coarse_end - inlier_count_start).count();
 
-        // 4.2 Top-K选择：选出coarse_score最高的k个模型索引
+        // 3.2 Top-K选择：选出coarse_score最高的k个模型索引
         const int fine_k = 20;  // 精选阶段候选数量（可从params_读取）
         launchSelectTopKModels(fine_k);
         auto topk_end = std::chrono::high_resolution_clock::now();
         float topk_time = std::chrono::duration<float, std::milli>(topk_end - coarse_end).count();
 
-        // 4.3 精选阶段：对前k个模型进行全量计数
+        // 3.3 精选阶段：对前k个模型进行全量计数
         launchFineCountInliersBatch(fine_k);  // 精选，得到fine_score
         auto fine_end = std::chrono::high_resolution_clock::now();
         float fine_time = std::chrono::duration<float, std::milli>(fine_end - topk_end).count();
@@ -412,12 +404,11 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
         if (params_.verbosity > 0)
         {
-            float iteration_total = sampling_time + inverse_power_time + inlier_count_time + 
+            float iteration_total = sampling_time + inlier_count_time + 
                                   best_model_time + extract_inliers_time + extract_cloud_time + remove_points_time;
             std::cout << "[QuadricDetect] 已保存第 " << detected_primitives_.size() << " 个二次曲面" << std::endl;
             std::cout << "[QuadricDetect] 迭代 " << iteration + 1 << " 时间: " << iteration_total << " ms" << std::endl;
             std::cout << "  - 采样和构建矩阵: " << sampling_time << " ms" << std::endl;
-            std::cout << "  - 反幂迭代: " << inverse_power_time << " ms" << std::endl;
             std::cout << "  - 计算内点数: " << inlier_count_time << " ms" << std::endl;
             std::cout << "    - 粗筛阶段: " << coarse_time << " ms" << std::endl;
             std::cout << "    - Top-K选择: " << topk_time << " ms" << std::endl;
@@ -443,7 +434,6 @@ void QuadricDetect::findQuadrics_BatchGPU()
         std::cout << "[QuadricDetect] 总时间统计:" << std::endl;
         std::cout << "  - 初始化: " << init_time << " ms" << std::endl;
         std::cout << "  - 采样和构建矩阵: " << total_sampling_time << " ms" << std::endl;
-        std::cout << "  - 反幂迭代: " << total_inverse_power_time << " ms" << std::endl;
         std::cout << "  - 计算内点数: " << total_inlier_count_time << " ms" << std::endl;
         std::cout << "    - 粗筛阶段: " << total_coarse_time << " ms" << std::endl;
         std::cout << "    - Top-K选择: " << total_topk_time << " ms" << std::endl;
@@ -465,7 +455,7 @@ void QuadricDetect::performBatchInversePowerIteration(int batch_size)
         std::cout << "[QuadricDetect] 启动批量反幂迭代，batch_size=" << batch_size << std::endl;
     }
 
-    // Step 1: 从9×10矩阵计算10×10的A^T*A矩阵
+    // Step 1: 从6×10矩阵（填充为9×10）计算10×10的A^T*A矩阵
     auto ata_start = std::chrono::high_resolution_clock::now();
     launchComputeATA(batch_size);
     auto ata_end = std::chrono::high_resolution_clock::now();
