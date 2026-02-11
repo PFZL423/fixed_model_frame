@@ -395,23 +395,131 @@ __global__ void sampleAndBuildMatrices_Kernel(
 
     curandState local_state = rand_states[model_id];
 
-    // 采样6个点
+    // ========================================
+    // 锚点驱动的局部采样
+    // ========================================
+
+    // 第一步：选取全局锚点（种子点）
+    int seed_pos = curand(&local_state) % num_remaining;
+    int seed_idx = remaining_indices[seed_pos];
     int sample_indices[6];
-    for (int i = 0; i < 6; ++i)
+    sample_indices[0] = seed_idx;  // 第一个点是锚点
+
+    // 第二步：定义局部搜索窗口
+    int range = (int)(0.01f * num_remaining);
+    int low = max(0, seed_pos - range);
+    int high = min(num_remaining - 1, seed_pos + range);
+    int window_size = high - low + 1;
+
+    // 第三步：窗口内伙伴采样（5个点）
+    int partner_count = 0;
+    int max_attempts = 100;  // 防止无限循环
+    int attempts = 0;
+
+    while (partner_count < 5 && attempts < max_attempts)
     {
-        sample_indices[i] = remaining_indices[curand(&local_state) % num_remaining];
+        attempts++;
+        // 在窗口内随机选择一个位置
+        int candidate_pos = low + (curand(&local_state) % window_size);
+        
+        // 强制约束：跳过Z轴方向过度密集的邻近点
+        if (abs(candidate_pos - seed_pos) > 3)
+        {
+            int candidate_idx = remaining_indices[candidate_pos];
+            
+            // 检查是否重复（简单检查）
+            bool is_duplicate = false;
+            for (int j = 0; j <= partner_count; ++j)
+            {
+                if (sample_indices[j] == candidate_idx)
+                {
+                    is_duplicate = true;
+                    break;
+                }
+            }
+            
+            if (!is_duplicate)
+            {
+                partner_count++;
+                sample_indices[partner_count] = candidate_idx;
+            }
+        }
     }
 
-    // 调试输出：打印前3个模型的采样点
+    // 如果未能采样到5个伙伴点，使用全局随机填充
+    if (partner_count < 5)
+    {
+        for (int i = partner_count + 1; i < 6; ++i)
+        {
+            sample_indices[i] = remaining_indices[curand(&local_state) % num_remaining];
+        }
+    }
+
+    // ========================================
+    // 几何跨度校验
+    // ========================================
+
+    // 获取6个点的3D坐标
+    GPUPoint3f sampled_points[6];
+    for (int i = 0; i < 6; ++i)
+    {
+        sampled_points[i] = all_points[sample_indices[i]];
+    }
+
+    // 计算包围盒
+    float min_x = sampled_points[0].x, max_x = sampled_points[0].x;
+    float min_y = sampled_points[0].y, max_y = sampled_points[0].y;
+    float min_z = sampled_points[0].z, max_z = sampled_points[0].z;
+
+    for (int i = 1; i < 6; ++i)
+    {
+        min_x = fminf(min_x, sampled_points[i].x);
+        max_x = fmaxf(max_x, sampled_points[i].x);
+        min_y = fminf(min_y, sampled_points[i].y);
+        max_y = fmaxf(max_y, sampled_points[i].y);
+        min_z = fminf(min_z, sampled_points[i].z);
+        max_z = fmaxf(max_z, sampled_points[i].z);
+    }
+
+    float dx = max_x - min_x;
+    float dy = max_y - min_y;
+    float dz = max_z - min_z;
+
+    // 退化判定：XY平面上几乎共线或过于聚集
+    bool is_degenerate = (dx < 0.2f) && (dy < 0.2f);
+
+    // 调试输出：打印前3个模型的采样信息
     if (model_id < 3)
     {
-        printf("模型 %d 采样点: ", model_id);
-        for (int i = 0; i < 6; ++i)
+        printf("模型 %d 锚点采样: seed_pos=%d, seed_idx=%d, window=[%d,%d], ", 
+               model_id, seed_pos, seed_idx, low, high);
+        printf("包围盒长度: dx=%.3f, dy=%.3f, dz=%.3f, ", dx, dy, dz);
+        printf("退化=%s\n", is_degenerate ? "是" : "否");
+        if (!is_degenerate)
         {
-            GPUPoint3f pt = all_points[sample_indices[i]];
-            printf("点%d=(%.3f,%.3f,%.3f) ", i, pt.x, pt.y, pt.z);
+            printf("  采样点: ");
+            for (int i = 0; i < 6; ++i)
+            {
+                printf("点%d=(%.3f,%.3f,%.3f) ", i, 
+                       sampled_points[i].x, sampled_points[i].y, sampled_points[i].z);
+            }
+            printf("\n");
         }
-        printf("\n");
+    }
+
+    if (is_degenerate)
+    {
+        // 设置无效标志：将模型的所有系数设为0，coeffs[15]设为-1.0f表示无效
+        GPUQuadricModel *model = &batch_models[model_id];
+        for (int i = 0; i < 16; ++i)
+        {
+            model->coeffs[i] = 0.0f;
+        }
+        model->coeffs[15] = -1.0f;  // 使用负数作为无效标志
+        
+        // 恢复随机数状态
+        rand_states[model_id] = local_state;
+        return;  // 跳过后续PCA和6×6求解
     }
 
     // ========================================

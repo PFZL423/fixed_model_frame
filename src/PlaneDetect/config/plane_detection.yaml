@@ -32,8 +32,8 @@ plane_hull_padding: 0.02
 # PlaneDetect算法核心参数
 min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
 plane_distance_threshold: 0.12 # 平面内点距离阈值 (m)
-min_plane_inlier_count_absolute: 40000 # 有效模型的最小内点数(绝对值)
-plane_max_iterations: 100 # RANSAC最大迭代次数
+min_plane_inlier_count_absolute: 10000 # 有效模型的最小内点数(绝对值)
+plane_max_iterations: 1000 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
 batch_size: 512 # GPU批处理大小
 verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
