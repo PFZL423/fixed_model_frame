@@ -1,7 +1,7 @@
 # PlaneDetect配置参数
 # 体素降采样参数
 enable_voxel_filter: true # 是否启用体素降采样
-voxel_leaf_size: 0.1 # 体素大小 (m)
+voxel_leaf_size: 0.02 # 体素大小 (m)
 
 # 离群点移除参数
 enable_outlier_removal: false # 是否启用离群点移除
@@ -31,8 +31,8 @@ plane_hull_padding: 0.02
 
 # PlaneDetect算法核心参数
 min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
-plane_distance_threshold: 0.12 # 平面内点距离阈值 (m)
-min_plane_inlier_count_absolute: 10000 # 有效模型的最小内点数(绝对值)
+plane_distance_threshold: 0.05 # 平面内点距离阈值 (m)
+min_plane_inlier_count_absolute: 40000 # 有效模型的最小内点数(绝对值)
 plane_max_iterations: 1000 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
 batch_size: 512 # GPU批处理大小
@@ -58,7 +58,7 @@ min_remaining_points_for_quadric: 10000 # 二次曲面检测的最小点数阈�
 
 # QuadricDetect算法参数
 quadric_min_remaining_points_percentage: 0.1 # 剩余点数阈值(相对于总点数)
-quadric_distance_threshold: 0.15 # 二次曲面内点距离阈值 (m)
+quadric_distance_threshold: 0.07 # 二次曲面内点距离阈值 (m)
 min_quadric_inlier_count_absolute: 3000 # 有效模型的最小内点数(绝对值)
 quadric_max_iterations: 300 # RANSAC最大迭代次数（降低负载）
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例

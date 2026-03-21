@@ -413,9 +413,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
             detected_quadric.has_visualization_data = true;
             
             if (params_.verbosity > 0) {
-                ROS_INFO("[QuadricDetect] 已保存可视化数据: best_model_idx=%d, explicit_coeffs=[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]", 
-                         best_model_idx, h_explicit_coeffs[0], h_explicit_coeffs[1], h_explicit_coeffs[2],
-                         h_explicit_coeffs[3], h_explicit_coeffs[4], h_explicit_coeffs[5]);
+                ROS_DEBUG("[QuadricDetect] viz coeffs saved idx=%d", best_model_idx);
             }
         } else {
             // 如果索引无效，标记为无可视化数据
@@ -1142,16 +1140,16 @@ void QuadricDetect::computeVisualizationMarkers(
     bool clip_to_hull) const
 {
     if (!primitive.has_visualization_data) {
-        ROS_WARN("[computeVisualizationMarkers] primitive.has_visualization_data = false，跳过可视化");
+        ROS_DEBUG("[computeVisualizationMarkers] skip: no visualization data");
         return;
     }
     
     if (primitive.inliers->empty()) {
-        ROS_WARN("[computeVisualizationMarkers] primitive.inliers为空，跳过可视化");
+        ROS_DEBUG("[computeVisualizationMarkers] skip: empty inliers");
         return;
     }
     
-    ROS_INFO("[computeVisualizationMarkers] 开始处理，内点数: %zu", primitive.inliers->size());
+    ROS_DEBUG("[computeVisualizationMarkers] inliers=%zu", primitive.inliers->size());
     
     // ========================================
     // 1. 3σ离群点剔除
@@ -1188,7 +1186,7 @@ void QuadricDetect::computeVisualizationMarkers(
         }
     }
     
-    ROS_INFO("[computeVisualizationMarkers] 3σ过滤: 原始内点数=%zu, 过滤后=%zu, mean=%.3f, std_dev=%.3f, threshold=%.3f", 
+    ROS_DEBUG("[computeVisualizationMarkers] 3sigma: raw=%zu filt=%zu mean=%.3f std=%.3f thr=%.3f",
              local_points.size(), filtered_local_points.size(), mean, std_dev, threshold);
     
     if (filtered_local_points.size() < 3) {
@@ -1206,7 +1204,7 @@ void QuadricDetect::computeVisualizationMarkers(
     
     std::vector<Point2D> hull_2d = grahamScan(points_2d);
     
-    ROS_INFO("[computeVisualizationMarkers] 凸包生成: 输入点数=%zu, 凸包点数=%zu", points_2d.size(), hull_2d.size());
+    ROS_DEBUG("[computeVisualizationMarkers] hull: in=%zu out=%zu", points_2d.size(), hull_2d.size());
     
     if (hull_2d.size() < 3) {
         ROS_WARN("[computeVisualizationMarkers] 凸包点数太少 (%zu < 3)，无法继续", hull_2d.size());
@@ -1233,8 +1231,7 @@ void QuadricDetect::computeVisualizationMarkers(
     
     float bbox_dx = max_x - min_x;
     float bbox_dy = max_y - min_y;
-    ROS_INFO("[computeVisualizationMarkers] Bounding Box: min_x=%.3f, max_x=%.3f, min_y=%.3f, max_y=%.3f, 范围: dx=%.3f, dy=%.3f",
-             min_x, max_x, min_y, max_y, bbox_dx, bbox_dy);
+    ROS_DEBUG("[computeVisualizationMarkers] bbox dx=%.3f dy=%.3f", bbox_dx, bbox_dy);
     
     // ========================================
     // 4. 生成网格点并判断是否在凸包内
@@ -1246,7 +1243,7 @@ void QuadricDetect::computeVisualizationMarkers(
     float adjusted_grid_step = grid_step;
     if (grid_step > bbox_dx * 0.1f || grid_step > bbox_dy * 0.1f) {
         adjusted_grid_step = std::min(bbox_dx, bbox_dy) * 0.05f; // 使用bounding box的5%作为步长
-        ROS_WARN("[computeVisualizationMarkers] 网格步长太大 (%.4f)，自动调整为 %.4f", grid_step, adjusted_grid_step);
+        ROS_DEBUG("[computeVisualizationMarkers] grid_step %.4f -> %.4f", grid_step, adjusted_grid_step);
     }
     
     // 生成网格点
@@ -1255,8 +1252,8 @@ void QuadricDetect::computeVisualizationMarkers(
     int grid_height = static_cast<int>((max_y - min_y) / adjusted_grid_step) + 1;
     grid_indices.resize(grid_height, std::vector<int>(grid_width, -1));
     
-    ROS_INFO("[computeVisualizationMarkers] 网格参数: 原始grid_step=%.4f, 调整后=%.4f, grid_width=%d, grid_height=%d, clip_to_hull=%d",
-             grid_step, adjusted_grid_step, grid_width, grid_height, clip_to_hull);
+    ROS_DEBUG("[computeVisualizationMarkers] grid %dx%d step=%.4f clip_hull=%d",
+             grid_width, grid_height, adjusted_grid_step, clip_to_hull ? 1 : 0);
     
     int vertex_count = 0;
     int points_in_hull = 0;
@@ -1319,8 +1316,8 @@ void QuadricDetect::computeVisualizationMarkers(
         }
     }
     
-    ROS_INFO("[computeVisualizationMarkers] 网格点统计: 总网格点数=%d, 在凸包内=%d, 在凸包外=%d, 生成顶点数=%d",
-             grid_width * grid_height, points_in_hull, points_out_hull, vertex_count);
+    ROS_DEBUG("[computeVisualizationMarkers] grid cells=%d in_hull=%d verts=%d",
+             grid_width * grid_height, points_in_hull, vertex_count);
     
     // ========================================
     // 5. 生成三角形（每个网格单元2个三角形）
@@ -1368,13 +1365,11 @@ void QuadricDetect::computeVisualizationMarkers(
         }
     }
     
-    ROS_INFO("[computeVisualizationMarkers] 三角形生成: 生成了 %d 个三角形, marker包含 %zu 个顶点", 
-             triangles_generated, marker.points.size());
+    ROS_DEBUG("[computeVisualizationMarkers] tris=%d marker_verts=%zu", triangles_generated, marker.points.size());
     
     if (!marker.points.empty()) {
         marker_array.markers.push_back(marker);
-        ROS_INFO("[computeVisualizationMarkers] ✓ 成功生成marker，包含 %zu 个顶点", marker.points.size());
     } else {
-        ROS_WARN("[computeVisualizationMarkers] ✗ 生成的marker为空（没有顶点），可能原因：1) 网格步长太大 2) 没有网格点在凸包内 3) 三角形生成失败");
+        ROS_WARN("[computeVisualizationMarkers] empty marker (check grid_step / hull / clip)");
     }
 }

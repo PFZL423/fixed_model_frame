@@ -48,7 +48,8 @@ public:
         // 设置订阅和发布
         setupPubSub();
 
-        ROS_INFO("Unified Detection Node initialized successfully");
+        ROS_INFO("plane_test_node ready: sub=%s pub=plane_markers,quadric_markers,remaining_cloud,...",
+                 input_topic_.c_str());
     }
 
     ~PlaneSupervoxelNode()
@@ -191,38 +192,22 @@ private:
         pnh_.param("sv_min_points_for_hull", min_points_tmp, 3);
         sv_params_.min_points_for_hull = static_cast<size_t>(min_points_tmp);
 
-        ROS_INFO("Parameters loaded:");
-        ROS_INFO("  Voxel filter: %s (leaf_size=%.4f)", enable_voxel_filter_ ? "enabled" : "disabled", voxel_leaf_size_);
-        ROS_INFO("  Outlier removal: %s (k=%d, std_dev=%.2f)", enable_outlier_removal_ ? "enabled" : "disabled", outlier_k_neighbors_, outlier_std_dev_thresh_);
-        ROS_INFO("  Input topic: %s", input_topic_.c_str());
-        ROS_INFO("  Distance threshold: %.4f", detector_params_.plane_distance_threshold);
-        ROS_INFO("  Min inliers: %d", detector_params_.min_plane_inlier_count_absolute);
-        ROS_INFO("  Batch size: %d", detector_params_.batch_size);
-        ROS_INFO("  RANSAC coarse ratio: %.4f (stride=%d)", 
-                 detector_params_.ransac_coarse_ratio,
-                 (detector_params_.ransac_coarse_ratio >= 1.0) ? 1 : 
-                 static_cast<int>(1.0 / detector_params_.ransac_coarse_ratio));
-        ROS_INFO("  RANSAC fine k: %d", detector_params_.ransac_fine_k);
-        ROS_INFO("  Supervoxel: %s", enable_supervoxel_ ? "enabled" : "disabled");
-        if (enable_supervoxel_)
-        {
-            ROS_INFO("    Voxel resolution: %.3f", sv_params_.voxel_resolution);
-            ROS_INFO("    Seed resolution: %.3f", sv_params_.seed_resolution);
-            ROS_INFO("    Min points threshold: %d", min_remaining_points_for_supervoxel_);
-        }
-    ROS_INFO("  Plane viz: scheme=%s, checkerboard=%s, alpha=%.2f, grid=%d, clip_to_hull=%s, padding=%.3f, smooth=%.2f",
-         plane_color_scheme_.c_str(), plane_checkerboard_ ? "true" : "false", plane_alpha_, plane_grid_size_,
-         plane_clip_to_hull_ ? "true" : "false", plane_hull_padding_, plane_hull_smooth_factor_);
-    ROS_INFO("  Visualization toggles: global=%s, planes=%s, convex_hulls=%s",
-         enable_visualization_ ? "on" : "off",
-         enable_plane_visualization_ ? "on" : "off",
-         enable_convex_hull_visualization_ ? "on" : "off");
+        ROS_INFO("Params: topic=%s voxel=%s outlier=%s plane(dist=%.4f,min_in=%d,batch=%d) supervoxel=%s viz=%d/%d/%d",
+                 input_topic_.c_str(),
+                 enable_voxel_filter_ ? "on" : "off",
+                 enable_outlier_removal_ ? "on" : "off",
+                 detector_params_.plane_distance_threshold,
+                 detector_params_.min_plane_inlier_count_absolute,
+                 detector_params_.batch_size,
+                 enable_supervoxel_ ? "on" : "off",
+                 enable_visualization_ ? 1 : 0,
+                 enable_plane_visualization_ ? 1 : 0,
+                 enable_convex_hull_visualization_ ? 1 : 0);
     }
 
     void initializePlaneDetector()
     {
         plane_detector_ = std::make_unique<PlaneDetect<pcl::PointXYZI>>(detector_params_);
-        ROS_INFO("PlaneDetector initialized with batch_size=%d", detector_params_.batch_size);
     }
 
     void initializeGPUPreprocessor()
@@ -241,8 +226,6 @@ private:
         // 配置统一流（关键：确保串行无锁流水线）
         gpu_preprocessor_->setStream(unified_stream_);
         plane_detector_->setStream(unified_stream_);
-
-        ROS_INFO("GPUPreprocessor initialized with unified CUDA stream");
     }
 
     void initializeQuadricDetector()
@@ -252,9 +235,6 @@ private:
         
         // 绑定统一流
         quadric_detector_->setStream(unified_stream_);
-
-        ROS_INFO("QuadricDetector initialized with threshold=%.3f", 
-                 quadric_params_.quadric_distance_threshold);
     }
 
     void initializeSupervoxelProcessor()
@@ -262,7 +242,6 @@ private:
         if (enable_supervoxel_)
         {
             sv_processor_ = std::make_unique<super_voxel::SupervoxelProcessor>(sv_params_);
-            ROS_INFO("SupervoxelProcessor initialized");
         }
     }
 
@@ -282,11 +261,6 @@ private:
         
         // 发布最终结果点云
         result_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("remaining_cloud", 1, true);
-
-        ROS_INFO("=== Unified Detection Node: Plane + Quadric ===");
-        ROS_INFO("Subscribed to camera: %s", input_topic_.c_str());
-        ROS_INFO("Publishing plane markers to: plane_markers");
-        ROS_INFO("Publishing final result to: remaining_cloud");
     }
 
     // 回调1：处理相机原始点云，进行平面检测
@@ -295,7 +269,7 @@ private:
         // 全链路总计时开始
         auto total_start = std::chrono::high_resolution_clock::now();
         
-        ROS_INFO("Received point cloud with %d points", msg->width * msg->height);
+        ROS_DEBUG("Received point cloud with %d points", msg->width * msg->height);
 
         size_t num_points = msg->width * msg->height;
         if (num_points == 0)
@@ -399,7 +373,7 @@ private:
 
         // 获取 GPU 预处理性能统计（在整个函数中使用）
         const auto &gpu_stats = gpu_preprocessor_->getLastStats();
-        ROS_INFO("GPU preprocessing: %.2f ms (raw_upload=%.2fms, unpack=%.2fms, voxel=%.2fms, outlier=%.2fms), output: %zu points", 
+        ROS_DEBUG("GPU preprocess: %.2f ms (upload=%.2f unpack=%.2f voxel=%.2f outlier=%.2f) -> %zu pts",
                  gpu_preprocess_time, raw_upload_time, gpu_stats.upload_time_ms, gpu_stats.voxel_filter_time_ms,
                  gpu_stats.outlier_removal_time_ms, gpu_result.getPointCount());
 
@@ -413,7 +387,7 @@ private:
             return;
         }
 
-        ROS_INFO("Zero-copy: borrowing GPU buffer (%zu points)", point_count);
+        ROS_DEBUG("Zero-copy GPU buffer: %zu points", point_count);
 
         // ========== Step 3: 平面检测（零拷贝）==========
         auto plane_detect_start = std::chrono::high_resolution_clock::now();
@@ -422,7 +396,7 @@ private:
         float plane_detect_time = std::chrono::duration<float, std::milli>(
             plane_detect_end - plane_detect_start).count();
 
-        ROS_INFO("Plane detection (zero-copy): %.2f ms", plane_detect_time);
+        ROS_DEBUG("Plane detection: %.2f ms", plane_detect_time);
 
         // ========== Step 3: GPU 压实接力 ==========
         size_t rem_count = 0;
@@ -437,7 +411,7 @@ private:
             return;
         }
 
-        ROS_INFO("GPU compaction: %zu remaining points ready for quadric detection", rem_count);
+        ROS_DEBUG("GPU compaction: %zu pts for quadric", rem_count);
 
         // ========== Step 4: 二次曲面检测（零拷贝）==========
         auto quadric_detect_start = std::chrono::high_resolution_clock::now();
@@ -446,7 +420,7 @@ private:
         float quadric_detect_time = std::chrono::duration<float, std::milli>(
             quadric_detect_end - quadric_detect_start).count();
 
-        ROS_INFO("Quadric detection (zero-copy): %.2f ms", quadric_detect_time);
+        ROS_DEBUG("Quadric detection: %.2f ms", quadric_detect_time);
 
         // ========== Step 5: 安全同步与释放 ==========
         err = cudaStreamSynchronize(unified_stream_);
@@ -473,17 +447,13 @@ private:
         auto get_planes_end = std::chrono::high_resolution_clock::now();
         float get_planes_time = std::chrono::duration<float, std::milli>(get_planes_end - get_planes_start).count();
         
-        ROS_INFO("=== PLANE DETECTION RESULTS ===");
-        ROS_INFO("Number of planes detected: %zu", detected_planes.size());
-
-        // 输出每个平面的参数（访问 inliers->size() 可能触发数据传输）
+        // 详细平面日志（默认关闭，需设置 log level DEBUG）
         auto plane_log_start = std::chrono::high_resolution_clock::now();
         float total_plane_inlier_access_time = 0.0f;
         for (size_t i = 0; i < detected_planes.size(); ++i)
         {
             const auto &plane = detected_planes[i];
-            ROS_INFO("Plane %zu:", i + 1);
-            ROS_INFO("  Equation: %.4fx + %.4fy + %.4fz + %.4f = 0",
+            ROS_DEBUG("Plane %zu: eq %.4fx+%.4fy+%.4fz+%.4f=0", i + 1,
                      plane.model_coefficients[0], plane.model_coefficients[1],
                      plane.model_coefficients[2], plane.model_coefficients[3]);
             auto inlier_access_start = std::chrono::high_resolution_clock::now();
@@ -491,13 +461,13 @@ private:
             auto inlier_access_end = std::chrono::high_resolution_clock::now();
             float inlier_access_time = std::chrono::duration<float, std::milli>(inlier_access_end - inlier_access_start).count();
             total_plane_inlier_access_time += inlier_access_time;
-            ROS_INFO("  Inliers: %zu points", inlier_count);
-            if (inlier_access_time > 1.0f) {
-                ROS_INFO("    [WARNING] 访问内点数据耗时: %.2f ms (可能触发GPU->CPU传输)", inlier_access_time);
-            }
+            ROS_DEBUG("Plane %zu inliers: %zu (inlier_access %.2f ms)", i + 1, inlier_count, inlier_access_time);
         }
         auto plane_log_end = std::chrono::high_resolution_clock::now();
         float plane_log_time = std::chrono::duration<float, std::milli>(plane_log_end - plane_log_start).count();
+
+        // 平面可视化（内部受 enable_visualization_ && enable_plane_visualization_ 控制）
+        visualizePlanes(detected_planes, msg->header);
 
         // 获取二次曲面检测结果
         float get_quadrics_time = 0.0f;
@@ -509,9 +479,6 @@ private:
             const auto &detected_quadrics = quadric_detector_->getDetectedPrimitives();
             auto get_quadrics_end = std::chrono::high_resolution_clock::now();
             get_quadrics_time = std::chrono::duration<float, std::milli>(get_quadrics_end - get_quadrics_start).count();
-            
-            ROS_INFO("=== QUADRIC DETECTION RESULTS ===");
-            ROS_INFO("Number of quadrics detected: %zu", detected_quadrics.size());
 
             auto quadric_log_start = std::chrono::high_resolution_clock::now();
             for (size_t i = 0; i < detected_quadrics.size(); ++i)
@@ -522,63 +489,38 @@ private:
                 auto quadric_inlier_end = std::chrono::high_resolution_clock::now();
                 float quadric_inlier_time = std::chrono::duration<float, std::milli>(quadric_inlier_end - quadric_inlier_start).count();
                 total_quadric_inlier_access_time += quadric_inlier_time;
-                ROS_INFO("Quadric %zu: %zu inliers", i + 1, inlier_count);
-                if (quadric_inlier_time > 1.0f) {
-                    ROS_INFO("    [WARNING] 访问内点数据耗时: %.2f ms (可能触发GPU->CPU传输)", quadric_inlier_time);
-                }
+                ROS_DEBUG("Quadric %zu: %zu inliers (access %.2f ms)", i + 1, inlier_count, quadric_inlier_time);
             }
             
-            // 🆕 二次曲面可视化
             if (enable_visualization_ && enable_quadric_visualization_) {
-                ROS_INFO("[Quadric Visualization] 开始生成可视化Marker...");
-                ROS_INFO("[Quadric Visualization] enable_visualization_=%d, enable_quadric_visualization_=%d", 
-                         enable_visualization_, enable_quadric_visualization_);
-                ROS_INFO("[Quadric Visualization] 检测到的二次曲面数量: %zu", detected_quadrics.size());
-                
                 visualization_msgs::MarkerArray quadric_markers;
-                int quadrics_with_data = 0;
-                int quadrics_without_data = 0;
-                
                 for (size_t i = 0; i < detected_quadrics.size(); ++i) {
                     const auto &quadric = detected_quadrics[i];
-                    ROS_INFO("[Quadric Visualization] 二次曲面 %zu: has_visualization_data=%d, inliers=%zu", 
-                             i+1, quadric.has_visualization_data, quadric.inliers ? quadric.inliers->size() : 0);
-                    
                     if (quadric.has_visualization_data) {
-                        quadrics_with_data++;
-                        size_t markers_before = quadric_markers.markers.size();
                         quadric_detector_->computeVisualizationMarkers(
                             quadric, quadric_markers, msg->header,
-                            plane_grid_size_ * 0.01f,  // grid_step (从yaml读取，转换为米)
-                            static_cast<float>(plane_alpha_),  // alpha
-                            plane_clip_to_hull_);      // clip_to_hull
-                        size_t markers_after = quadric_markers.markers.size();
-                        ROS_INFO("[Quadric Visualization] 二次曲面 %zu 生成了 %zu 个markers", 
-                                 i+1, markers_after - markers_before);
+                            plane_grid_size_ * 0.01f,
+                            static_cast<float>(plane_alpha_),
+                            plane_clip_to_hull_);
                     } else {
-                        quadrics_without_data++;
-                        ROS_WARN("[Quadric Visualization] 二次曲面 %zu 没有可视化数据（has_visualization_data=false）", i+1);
+                        ROS_WARN("Quadric %zu: no visualization data, skip marker", i + 1);
                     }
                 }
-                
-                ROS_INFO("[Quadric Visualization] 有可视化数据的二次曲面: %d, 无可视化数据: %d", 
-                         quadrics_with_data, quadrics_without_data);
-                ROS_INFO("[Quadric Visualization] 总共生成了 %zu 个markers", quadric_markers.markers.size());
-                
                 if (!quadric_markers.markers.empty()) {
                     quadric_marker_pub_.publish(quadric_markers);
-                    ROS_INFO("[Quadric Visualization] ✓ 已发布 %zu 个quadric markers到话题 /quadric_markers", 
-                             quadric_markers.markers.size());
-                } else {
-                    ROS_WARN("[Quadric Visualization] ✗ 没有生成任何markers，不会发布消息");
+                } else if (!detected_quadrics.empty()) {
+                    ROS_WARN("Quadric viz: no markers generated for %zu quadric(s)", detected_quadrics.size());
                 }
-            } else {
-                ROS_WARN("[Quadric Visualization] 可视化被禁用: enable_visualization_=%d, enable_quadric_visualization_=%d", 
-                         enable_visualization_, enable_quadric_visualization_);
             }
             auto quadric_log_end = std::chrono::high_resolution_clock::now();
             quadric_log_time = std::chrono::duration<float, std::milli>(quadric_log_end - quadric_log_start).count();
         }
+
+        if (quadric_success)
+            ROS_INFO("Frame: planes=%zu quadrics=%zu", detected_planes.size(),
+                     quadric_detector_->getDetectedPrimitives().size());
+        else
+            ROS_INFO("Frame: planes=%zu quadric=fail", detected_planes.size());
         
         auto result_end = std::chrono::high_resolution_clock::now();
         float result_time = std::chrono::duration<float, std::milli>(result_end - result_start).count();
@@ -774,7 +716,7 @@ private:
         }
 
         plane_marker_pub_.publish(marker_array);
-        ROS_INFO("Published %zu plane markers", planes.size());
+        ROS_DEBUG("Published %zu plane markers", planes.size());
     }
 
     void generatePlaneVisualization(const DetectedPrimitive<pcl::PointXYZI> &plane,
@@ -931,6 +873,38 @@ private:
             pts.push_back(P2{u.dot(d), v.dot(d)});
         }
         if (pts.size() < 3) return false;
+
+        // 固定 3σ 径向预过滤（相对 (u,v) 质心即原点），再单调链凸包；过滤过严则回退全量点
+        {
+            std::vector<float> dists;
+            dists.reserve(pts.size());
+            for (const auto &p : pts) {
+                dists.push_back(std::sqrt(p.x * p.x + p.y * p.y));
+            }
+            float mean_d = 0.f;
+            for (float d : dists) {
+                mean_d += d;
+            }
+            mean_d /= static_cast<float>(dists.size());
+            float var_d = 0.f;
+            for (float d : dists) {
+                float t = d - mean_d;
+                var_d += t * t;
+            }
+            var_d /= static_cast<float>(dists.size());
+            float sigma_d = std::sqrt(var_d);
+            const float thresh = mean_d + 3.0f * sigma_d;
+            std::vector<P2> pts_filtered;
+            pts_filtered.reserve(pts.size());
+            for (size_t i = 0; i < pts.size(); ++i) {
+                if (dists[i] < thresh) {
+                    pts_filtered.push_back(pts[i]);
+                }
+            }
+            if (pts_filtered.size() >= 3) {
+                pts.swap(pts_filtered);
+            }
+        }
 
         // 单调链凸包
         auto cross = [](const P2 &O, const P2 &A, const P2 &B){
@@ -1119,7 +1093,7 @@ private:
             msg.header.frame_id = output_frame_;
             result_cloud_pub_.publish(msg);
 
-            ROS_INFO("Published remaining cloud with %zu points", remaining_cloud->size());
+            ROS_DEBUG("Published remaining_cloud: %zu pts", remaining_cloud->size());
         }
     }
 
@@ -1135,13 +1109,9 @@ private:
 
         if (static_cast<int>(remaining_cloud->size()) < min_remaining_points_for_supervoxel_)
         {
-            ROS_INFO("Remaining cloud too small (%zu points < %d threshold), skipping supervoxel",
-                     remaining_cloud->size(), min_remaining_points_for_supervoxel_);
+            ROS_DEBUG("Supervoxel skip: %zu pts < %d", remaining_cloud->size(), min_remaining_points_for_supervoxel_);
             return;
         }
-
-        ROS_INFO("=== SUPERVOXEL PROCESSING ===");
-        ROS_INFO("Input remaining cloud: %zu points", remaining_cloud->size());
 
         // 2. 执行超体素分割
         // auto sv_start = std::chrono::high_resolution_clock::now();
@@ -1159,14 +1129,8 @@ private:
         const auto &convex_hulls = sv_processor_->getConvexHulls();
         const auto &stats = sv_processor_->getProcessingStats();
 
-        // ROS_INFO("Supervoxel processing time: %ld ms", sv_duration.count());
-        ROS_INFO("Total supervoxels: %zu", stats.total_supervoxels);
-        ROS_INFO("Valid convex hulls: %zu", stats.valid_convex_hulls);
-        if (stats.valid_convex_hulls > 0)
-        {
-            ROS_INFO("Avg points per hull: %.1f", stats.getAvgPointsPerHull());
-            // ROS_INFO("Avg time per hull: %.2f ms", stats.getAvgTimePerHull());
-        }
+        ROS_INFO("Supervoxel: voxels=%zu hulls=%zu input_pts=%zu",
+                 stats.total_supervoxels, stats.valid_convex_hulls, remaining_cloud->size());
 
         // 4. 可视化凸包（受开关控制）
         if (enable_visualization_ && enable_convex_hull_visualization_)
@@ -1241,7 +1205,7 @@ private:
         }
 
         convex_hull_marker_pub_.publish(marker_array); // 使用独立话题
-        ROS_INFO("Published %zu convex hull markers", hulls.size());
+        ROS_DEBUG("Published %zu convex hull markers", hulls.size());
     }
 };
 
@@ -1254,7 +1218,6 @@ int main(int argc, char **argv)
     try
     {
         PlaneSupervoxelNode node(nh, pnh);
-        ROS_INFO("Unified Detection Node started, waiting for point clouds...");
         ros::spin();
     }
     catch (const std::exception &e)

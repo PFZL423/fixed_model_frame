@@ -683,6 +683,9 @@ void PlaneDetect<PointT>::findPlanesFromGPU(GPUPoint3f* d_external_points, size_
         return;
     }
 
+    // 每帧清空检测结果，避免与 processCloud 路径不一致导致跨帧累积（push_back 叠加上一帧）
+    detected_primitives_.clear();
+
     // Step 1: 状态保存
     d_points_backup_ = d_points_buffer_;
 
