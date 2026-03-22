@@ -16,6 +16,7 @@
 #include <limits>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 
 #include "PlaneDetect/PlaneDetect.h"
 #include "super_voxel/supervoxel.h"
@@ -177,7 +178,7 @@ private:
         pnh_.param("min_quadric_inlier_count_absolute", quadric_params_.min_quadric_inlier_count_absolute, 500);
         pnh_.param("quadric_max_iterations", quadric_params_.quadric_max_iterations, 5000);
         pnh_.param("min_quadric_inlier_percentage", quadric_params_.min_quadric_inlier_percentage, 0.05);
-        pnh_.param("quadric_verbosity", quadric_params_.verbosity, 1);
+        pnh_.param("quadric_verbosity", quadric_params_.verbosity, 0);
 
         // 超体素算法参数
         pnh_.param("sv_voxel_resolution", sv_params_.voxel_resolution, 0.05);
@@ -278,9 +279,13 @@ private:
             return;
         }
 
-        // ========== 解析字段偏移 ==========
-        int x_offset = -1, y_offset = -1, z_offset = -1, intensity_offset = -1;
-        uint8_t x_datatype = 0, y_datatype = 0, z_datatype = 0, intensity_datatype = 0;
+        // ========== 解析字段偏移（Raw→GPU，不经 PCL）==========
+        // 必选：x,y,z。可选强度：intensity 优先，否则 reflectivity（部分雷达包命名）。
+        // rgb/r/g/b 不解析，兼容 XYZRGB 点云（颜色丢弃，GPU 侧 I=0 或无强度字段时 I=0）。
+        int x_offset = -1, y_offset = -1, z_offset = -1;
+        int intensity_offset = -1, reflectivity_offset = -1;
+        uint8_t x_datatype = 0, y_datatype = 0, z_datatype = 0;
+        uint8_t intensity_datatype = 0, reflectivity_datatype = 0;
 
         for (const auto& field : msg->fields)
         {
@@ -304,7 +309,21 @@ private:
                 intensity_offset = field.offset;
                 intensity_datatype = field.datatype;
             }
+            else if (field.name == "reflectivity")
+            {
+                reflectivity_offset = field.offset;
+                reflectivity_datatype = field.datatype;
+            }
         }
+
+        const int strength_offset =
+            (intensity_offset >= 0) ? intensity_offset : reflectivity_offset;
+        const uint8_t strength_datatype =
+            (intensity_offset >= 0) ? intensity_datatype : reflectivity_datatype;
+        ROS_DEBUG("PointCloud2 strength field: %s",
+                  intensity_offset >= 0
+                      ? "intensity"
+                      : (reflectivity_offset >= 0 ? "reflectivity" : "none (I=0)"));
 
         // 验证必需字段
         if (x_offset < 0 || y_offset < 0 || z_offset < 0)
@@ -360,8 +379,8 @@ private:
             d_raw_data,
             num_points,
             msg->point_step,
-            x_offset, y_offset, z_offset, intensity_offset,
-            x_datatype, y_datatype, z_datatype, intensity_datatype,
+            x_offset, y_offset, z_offset, strength_offset,
+            x_datatype, y_datatype, z_datatype, strength_datatype,
             gpu_config
         );
         auto gpu_preprocess_end = std::chrono::high_resolution_clock::now();
@@ -466,6 +485,18 @@ private:
         auto plane_log_end = std::chrono::high_resolution_clock::now();
         float plane_log_time = std::chrono::duration<float, std::milli>(plane_log_end - plane_log_start).count();
 
+        // 每帧始终输出平面方程（与 plane/quadric verbosity 无关）：Ax+By+Cz+D=0
+        for (size_t i = 0; i < detected_planes.size(); ++i)
+        {
+            const auto &pl = detected_planes[i];
+            const size_t nin = pl.inliers ? pl.inliers->size() : 0;
+            ROS_INFO(
+                "Plane[%zu] inliers=%zu  %.8g*x + %.8g*y + %.8g*z + %.8g = 0",
+                i, nin,
+                pl.model_coefficients[0], pl.model_coefficients[1],
+                pl.model_coefficients[2], pl.model_coefficients[3]);
+        }
+
         // 平面可视化（内部受 enable_visualization_ && enable_plane_visualization_ 控制）
         visualizePlanes(detected_planes, msg->header);
 
@@ -512,6 +543,29 @@ private:
                     ROS_WARN("Quadric viz: no markers generated for %zu quadric(s)", detected_quadrics.size());
                 }
             }
+
+            // 每帧始终输出二次曲面齐次矩阵 Q（行主序，与 quadric_verbosity 无关）：[x y z 1]^T Q [x y z 1] = 0
+            for (size_t i = 0; i < detected_quadrics.size(); ++i)
+            {
+                const auto &qu = detected_quadrics[i];
+                const size_t nin = qu.inliers ? qu.inliers->size() : 0;
+                std::ostringstream qrow;
+                qrow << std::fixed << std::setprecision(6);
+                const Eigen::Matrix4f &Q = qu.model_coefficients;
+                for (int r = 0; r < 4; ++r)
+                    for (int c = 0; c < 4; ++c)
+                        qrow << (r == 0 && c == 0 ? "" : " ") << Q(r, c);
+                ROS_INFO("Quadric[%zu] inliers=%zu Q_rowmajor=[%s]  (homogeneous p^T*Q*p=0)", i, nin, qrow.str().c_str());
+                if (qu.has_visualization_data)
+                {
+                    ROS_INFO(
+                        "Quadric[%zu] local_explicit z=a*x^2+b*x*y+c*y^2+d*x+e*y+f: a=%.6f b=%.6f c=%.6f d=%.6f e=%.6f f=%.6f",
+                        i,
+                        qu.explicit_coeffs[0], qu.explicit_coeffs[1], qu.explicit_coeffs[2],
+                        qu.explicit_coeffs[3], qu.explicit_coeffs[4], qu.explicit_coeffs[5]);
+                }
+            }
+
             auto quadric_log_end = std::chrono::high_resolution_clock::now();
             quadric_log_time = std::chrono::duration<float, std::milli>(quadric_log_end - quadric_log_start).count();
         }
@@ -874,7 +928,7 @@ private:
         }
         if (pts.size() < 3) return false;
 
-        // 固定 3σ 径向预过滤（相对 (u,v) 质心即原点），再单调链凸包；过滤过严则回退全量点
+        // 固定 2σ 径向预过滤（相对 (u,v) 质心即原点），再单调链凸包；过滤过严则回退全量点
         {
             std::vector<float> dists;
             dists.reserve(pts.size());
@@ -893,7 +947,7 @@ private:
             }
             var_d /= static_cast<float>(dists.size());
             float sigma_d = std::sqrt(var_d);
-            const float thresh = mean_d + 3.0f * sigma_d;
+            const float thresh = mean_d + 2.0f * sigma_d;
             std::vector<P2> pts_filtered;
             pts_filtered.reserve(pts.size());
             for (size_t i = 0; i < pts.size(); ++i) {

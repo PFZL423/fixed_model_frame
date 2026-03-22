@@ -81,7 +81,7 @@ bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr
     cudaStreamSynchronize(stream_);
     cudaDeviceSynchronize();
     
-    if (params_.verbosity > 0) {
+    if (params_.verbosity > 1) {
         std::cout << "[QuadricDetect] Timing breakdown:" << std::endl;
         std::cout << "  PCL->GPU convert: " << convert_time << " ms" << std::endl;
         std::cout << "  Quadric detection: " << detect_time << " ms" << std::endl;
@@ -171,7 +171,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
     int iteration = 0;
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
         std::cout << "[QuadricDetect] 开始检测，总点数: " << total_points
                   << ", 最小剩余点数: " << min_points << std::endl;
@@ -190,7 +190,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
     while (remaining_points >= min_points && iteration < max_iterations)
     {
-        if (params_.verbosity > 0)
+        if (params_.verbosity > 1)
         {
             std::cout << "[QuadricDetect] == 第 " << iteration + 1 << " 次迭代，剩余点数: " << remaining_points << " ==" << std::endl;
         }
@@ -332,7 +332,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
         if (params_.verbosity > 1)
         {
             std::cout << "[QuadricDetect] 最优模型选择结果:" << std::endl;
-            std::cout << "  最优候选索引: " << best_fine_idx << std:: endl;
+            std::cout << "  最优候选索引: " << best_fine_idx << std::endl;
             std::cout << "  最优模型索引（原始batch）: " << best_model_idx << std::endl;
             std::cout << "  最优模型内点数: " << best_count << std::endl;
             
@@ -345,7 +345,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
         // 如果剩余点数已经很少，且内点数不足，立即停止
         if (remaining_points < min_points * 2 && best_count < params_.min_quadric_inlier_count_absolute) {
-            if (params_.verbosity > 0) {
+            if (params_.verbosity > 1) {
                 std::cout << "[QuadricDetect] 剩余点数过少且内点不足，提前结束检测" << std::endl;
             }
             break;
@@ -353,7 +353,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
         if (best_count < params_.min_quadric_inlier_count_absolute)
         {
-            if (params_.verbosity > 0)
+            if (params_.verbosity > 1)
             {
                 std::cout << "[QuadricDetect] 最优模型内点数不足 (" << best_count 
                           << " < " << params_.min_quadric_inlier_count_absolute << ")，结束检测" << std::endl;
@@ -366,12 +366,9 @@ void QuadricDetect::findQuadrics_BatchGPU()
         thrust::copy_n(d_candidate_models_.begin(), fine_k, h_candidate_models.begin());
         GPUQuadricModel best_gpu_model = h_candidate_models[best_fine_idx];
 
-        // 添加：输出最优模型详情
-        if (params_.verbosity > 0)
+        if (params_.verbosity > 1)
         {
             outputBestModelDetails(best_gpu_model, best_count, best_model_idx, iteration + 1);
-            
-            // 新增：最终检查日志
             std::cout << "[Final Check] Best model count: " << best_count 
                       << ", Index: " << best_model_idx << std::endl;
         }
@@ -412,7 +409,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
             }
             detected_quadric.has_visualization_data = true;
             
-            if (params_.verbosity > 0) {
+            if (params_.verbosity > 1) {
                 ROS_DEBUG("[QuadricDetect] viz coeffs saved idx=%d", best_model_idx);
             }
         } else {
@@ -431,7 +428,7 @@ void QuadricDetect::findQuadrics_BatchGPU()
         float remove_points_time = std::chrono::duration<float, std::milli>(remove_points_end - remove_points_start).count();
         total_remove_points_time += remove_points_time;
 
-        if (params_.verbosity > 0)
+        if (params_.verbosity > 1)
         {
             float iteration_total = sampling_time + inlier_count_time + 
                                   best_model_time + extract_inliers_time + extract_cloud_time + remove_points_time;
@@ -459,19 +456,13 @@ void QuadricDetect::findQuadrics_BatchGPU()
 
     if (params_.verbosity > 0)
     {
-        std::cout << "[QuadricDetect] == 检测完成，共找到 " << detected_primitives_.size() << " 个二次曲面 ==" << std::endl;
-        std::cout << "[QuadricDetect] 总时间统计:" << std::endl;
-        std::cout << "  - 初始化: " << init_time << " ms" << std::endl;
-        std::cout << "  - 采样和构建矩阵: " << total_sampling_time << " ms" << std::endl;
-        std::cout << "  - 计算内点数: " << total_inlier_count_time << " ms" << std::endl;
-        std::cout << "    - 粗筛阶段: " << total_coarse_time << " ms" << std::endl;
-        std::cout << "    - Top-K选择: " << total_topk_time << " ms" << std::endl;
-        std::cout << "    - 精选阶段: " << total_fine_time << " ms" << std::endl;
-        std::cout << "  - 找最优模型: " << total_best_model_time << " ms" << std::endl;
-        std::cout << "  - 提取内点索引: " << total_extract_inliers_time << " ms" << std::endl;
-        std::cout << "  - 构建内点点云: " << total_extract_cloud_time << " ms" << std::endl;
-        std::cout << "  - 移除内点: " << total_remove_points_time << " ms" << std::endl;
-        std::cout << "  - 总检测时间: " << total_detect_time << " ms" << std::endl;
+        std::cout << "[QuadricDetect] 完成: " << detected_primitives_.size()
+                  << " 个二次曲面, " << total_detect_time << " ms" << std::endl;
+    }
+    if (params_.verbosity > 1)
+    {
+        std::cout << "[QuadricDetect] 总时间统计: 初始化 " << init_time << " ms, 采样 "
+                  << total_sampling_time << " ms, 内点计数 " << total_inlier_count_time << " ms" << std::endl;
     }
 }
 
@@ -698,10 +689,8 @@ bool QuadricDetect::processCloudDirect(GPUPoint3f* d_points, size_t count)
     auto total_end = std::chrono::high_resolution_clock::now();
     float total_time = std::chrono::duration<float, std::milli>(total_end - total_start).count();
 
-    if (params_.verbosity > 0) {
-        std::cout << "[processCloudDirect] Timing breakdown:" << std::endl;
-        std::cout << "  Quadric detection: " << detect_time << " ms" << std::endl;
-        std::cout << "  Total: " << total_time << " ms" << std::endl;
+    if (params_.verbosity > 1) {
+        std::cout << "[processCloudDirect] Quadric: " << detect_time << " ms, total " << total_time << " ms" << std::endl;
     }
 
     // 确保所有 GPU 操作完成
@@ -896,6 +885,8 @@ void QuadricDetect::validateInversePowerResults(int batch_size)
 //  新增函数：输出最优模型详情
 void QuadricDetect::outputBestModelDetails(const GPUQuadricModel &best_model, int inlier_count, int model_idx, int iteration)
 {
+    if (params_.verbosity < 2)
+        return;
     std::cout << "\n[QuadricDetect] ========== 第" << iteration << "次迭代最优模型详情 ==========" << std::endl;
     std::cout << "[QuadricDetect] 模型索引: " << model_idx << " (在1024个候选中)" << std::endl;
     std::cout << "[QuadricDetect] 内点数量: " << inlier_count << std::endl;
@@ -1152,7 +1143,7 @@ void QuadricDetect::computeVisualizationMarkers(
     ROS_DEBUG("[computeVisualizationMarkers] inliers=%zu", primitive.inliers->size());
     
     // ========================================
-    // 1. 3σ离群点剔除
+    // 1. 2σ离群点剔除
     // ========================================
     std::vector<GPUPoint3f> local_points;
     std::vector<float> distances;
@@ -1177,8 +1168,8 @@ void QuadricDetect::computeVisualizationMarkers(
     }
     float std_dev = sqrtf(variance / distances.size());
     
-    // 过滤：d < μ + 3σ
-    float threshold = mean + 3.0f * std_dev;
+    // 过滤：d < μ + 2σ
+    float threshold = mean + 2.0f * std_dev;
     std::vector<GPUPoint3f> filtered_local_points;
     for (size_t i = 0; i < local_points.size(); ++i) {
         if (distances[i] < threshold) {
@@ -1186,7 +1177,7 @@ void QuadricDetect::computeVisualizationMarkers(
         }
     }
     
-    ROS_DEBUG("[computeVisualizationMarkers] 3sigma: raw=%zu filt=%zu mean=%.3f std=%.3f thr=%.3f",
+    ROS_DEBUG("[computeVisualizationMarkers] 2sigma: raw=%zu filt=%zu mean=%.3f std=%.3f thr=%.3f",
              local_points.size(), filtered_local_points.size(), mean, std_dev, threshold);
     
     if (filtered_local_points.size() < 3) {

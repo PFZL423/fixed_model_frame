@@ -113,7 +113,7 @@ struct DetectorParams
     int lo_sample_size = 15;                       ///< 局部优化采样点数
 
     // === 调试和输出控制 ===
-    int verbosity = 1;                             ///< 详细输出级别 (0=静默, 1=正常, 2=详细)
+    int verbosity = 0;                             ///< 0=静默 1=摘要 2=详细（迭代/采样等）
 };
 
 /**

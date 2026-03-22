@@ -9,6 +9,11 @@ outlier_k_neighbors: 50 # 统计离群点移除的K近邻数量
 outlier_std_dev_thresh: 1.0 # 标准差倍数阈值
 
 # 话题和坐标系参数
+# 输入点云（sensor_msgs/PointCloud2）：主链路为 Raw→GPU 解包，不经 PCL 中间层。
+# 必选字段：x, y, z（任意 PointField 数值类型，与 GPUPreprocessor unpack 一致）。
+# 可选强度：intensity（优先）；若无则用 reflectivity；皆无则 GPUPoint3f.intensity=0。
+# rgb / r / g / b / rgba 不读取（XYZRGB 等彩色点云仅几何参与检测，颜色丢弃）。
+# 输出话题（如 remaining_cloud）仍为 PointXYZI 语义：强度来自上列字段或 0。
 input_topic: "/cloud_pcd" # 输入点云话题
 output_frame: "map" # 输出坐标系
 
@@ -32,7 +37,7 @@ plane_hull_padding: 0.02
 # PlaneDetect算法核心参数
 min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
 plane_distance_threshold: 0.05 # 平面内点距离阈值 (m)
-min_plane_inlier_count_absolute: 40000 # 有效模型的最小内点数(绝对值)
+min_plane_inlier_count_absolute: 35000 # 有效模型的最小内点数(绝对值)
 plane_max_iterations: 1000 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
 batch_size: 512 # GPU批处理大小
@@ -54,15 +59,15 @@ enable_quadric_visualization: true
 
 # ========== Quadric Detection ==========
 enable_quadric: true # 是否启用二次曲面检测
-min_remaining_points_for_quadric: 10000 # 二次曲面检测的最小点数阈值
+min_remaining_points_for_quadric: 20000 # 二次曲面检测的最小点数阈值
 
 # QuadricDetect算法参数
 quadric_min_remaining_points_percentage: 0.1 # 剩余点数阈值(相对于总点数)
-quadric_distance_threshold: 0.07 # 二次曲面内点距离阈值 (m)
-min_quadric_inlier_count_absolute: 3000 # 有效模型的最小内点数(绝对值)
+quadric_distance_threshold: 0.1 # 二次曲面内点距离阈值 (m)
+min_quadric_inlier_count_absolute: 20000 # 有效模型的最小内点数(绝对值)
 quadric_max_iterations: 300 # RANSAC最大迭代次数（降低负载）
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
-quadric_verbosity: 1 # 详细输出级别 (0=静默, 1=正常, 2=详细)
+quadric_verbosity: 0 # 0=静默 1=每帧一行摘要 2=迭代/采样详细日志
 
 # Supervoxel算法参数
 sv_voxel_resolution: 0.2 # 体素分辨率 (m)

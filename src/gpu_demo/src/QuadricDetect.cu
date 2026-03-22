@@ -30,10 +30,6 @@ __launch_bounds__(128)
 __global__ void initCurandStates_Kernel(curandState *states, unsigned long long seed, int n)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // 强制打印 GPU 端的索引：如果控制台没动静，说明内核罢工了
-    if (idx < 10) {
-        printf("Thread %d initializing\n", idx);
-    }
     if (idx < n)
     {
         // 强制初始化：手动给 states[idx] 赋一个非零的占位值
@@ -489,25 +485,6 @@ __global__ void sampleAndBuildMatrices_Kernel(
 
     // 退化判定：XY平面上几乎共线或过于聚集
     bool is_degenerate = (dx < 0.2f) && (dy < 0.2f);
-
-    // 调试输出：打印前3个模型的采样信息
-    if (model_id < 3)
-    {
-        printf("模型 %d 锚点采样: seed_pos=%d, seed_idx=%d, window=[%d,%d], ", 
-               model_id, seed_pos, seed_idx, low, high);
-        printf("包围盒长度: dx=%.3f, dy=%.3f, dz=%.3f, ", dx, dy, dz);
-        printf("退化=%s\n", is_degenerate ? "是" : "否");
-        if (!is_degenerate)
-        {
-            printf("  采样点: ");
-            for (int i = 0; i < 6; ++i)
-            {
-                printf("点%d=(%.3f,%.3f,%.3f) ", i, 
-                       sampled_points[i].x, sampled_points[i].y, sampled_points[i].z);
-            }
-            printf("\n");
-        }
-    }
 
     if (is_degenerate)
     {
@@ -1235,9 +1212,7 @@ void QuadricDetect::launchInitCurandStates(int batch_size)
     // 加入 clock() 增加随机性
     unsigned long long base_seed = (unsigned long long)time(nullptr) ^ (unsigned long long)clock();
 
-    // 检查显存地址：打印初始化时的地址
     g_init_rand_states_addr = thrust::raw_pointer_cast(d_rand_states_.data());
-    std::cout << "[launchInitCurandStates] 初始化时 d_rand_states_ 地址: " << g_init_rand_states_addr << std::endl;
 
     initCurandStates_Kernel<<<grid, block, 0, stream_>>>( 
         thrust::raw_pointer_cast(d_rand_states_.data()),
@@ -1249,17 +1224,12 @@ void QuadricDetect::launchInitCurandStates(int batch_size)
     if (err != cudaSuccess) {
         std::cerr << "!!! FATAL: initCurandStates_Kernel failed: " 
                   << cudaGetErrorString(err) << std::endl;
-    } else {
-        std::cout << "[launchInitCurandStates] 内核启动成功" << std::endl;
     }
     
-    // 强制同步并检查
     cudaError_t sync_err = cudaStreamSynchronize(stream_);
     if (sync_err != cudaSuccess) {
         std::cerr << "!!! FATAL: initCurandStates_Kernel sync failed: " 
                   << cudaGetErrorString(sync_err) << std::endl;
-    } else {
-        std::cout << "[launchInitCurandStates] 内核同步成功" << std::endl;
     }
 }
 
@@ -1271,7 +1241,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     // 获取初始化时的地址用于比较（从 launchInitCurandStates 中保存的静态变量）
     extern void* g_init_rand_states_addr;  // 声明外部静态变量
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
         std::cout << "[launchSampleAndBuildMatrices] 开始生成批量矩阵，batch_size=" << batch_size << std::endl;
         std::cout << "  - 剩余点数: " << d_remaining_indices_.size() << std::endl;
@@ -1340,13 +1310,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
     dim3 block(256);
     dim3 grid((batch_size + block.x - 1) / block.x);
 
-    // 检查显存地址：打印采样时的地址
     void* sample_addr = thrust::raw_pointer_cast(d_rand_states_.data());
-    std::cout << "[launchSampleAndBuildMatrices] 采样时 d_rand_states_ 地址: " << sample_addr << std::endl;
-    
-    // 从 launchInitCurandStates 获取初始化时的地址（通过静态变量）
-    // 注意：这里需要确保 launchInitCurandStates 已经调用过
-    // 如果地址不同，说明 Thrust 在中间偷偷搬了家
     if (g_init_rand_states_addr != nullptr && sample_addr != g_init_rand_states_addr) {
         std::cerr << "!!! WARNING: d_rand_states_ 地址已改变！初始化时: " << g_init_rand_states_addr 
                   << ", 采样时: " << sample_addr << std::endl;
@@ -1411,12 +1375,6 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         }
     }
     
-    // 调试信息：采样点已在内核中通过printf输出（仅前3个模型）
-    if (params_.verbosity > 1)
-    {
-        std::cout << "[launchSampleAndBuildMatrices] 采样点调试信息已在内核中输出（仅前3个模型）" << std::endl;
-    }
-
     //  验证生成的模型数据
     if (params_.verbosity > 1)
     {
@@ -1481,7 +1439,7 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         }
     }
 
-    if (params_.verbosity > 0)
+    if (params_.verbosity > 1)
     {
         std::cout << "[launchSampleAndBuildMatrices] 矩阵生成完成" << std::endl;
     }

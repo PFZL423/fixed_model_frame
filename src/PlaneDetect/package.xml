@@ -38,6 +38,11 @@
   <exec_depend>gpu_demo</exec_depend>
   <exec_depend>super_voxel</exec_depend>
 
+  <!-- Python: scripts/tf.py 点云 TF 变换 -->
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_sensor_msgs</exec_depend>
+
   <export>
   </export>
 </package>
