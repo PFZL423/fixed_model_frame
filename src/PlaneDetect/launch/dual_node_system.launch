@@ -3,9 +3,10 @@
   单节点实现：平面检测 + 二次曲面检测 + 超体素（零拷贝算法接力）
 -->
 <launch>
-    <!-- 统一节点: 平面检测 + 二次曲面检测 + 超体素 -->
+    <arg name="config_file" default="$(find PlaneDetect)/config/plane_detection.yaml" />
+    <!-- TUM RGB-D 点云 bag 管线可改为：config/plane_detection_tum_rgbd.yaml -->
     <node pkg="PlaneDetect" type="plane_test_node" name="unified_detection_node" output="screen">
-        <rosparam file="$(find PlaneDetect)/config/plane_detection.yaml" command="load"/>
+        <rosparam file="$(arg config_file)" command="load"/>
     </node>
 
     <!-- RViz 可视化 -->

@@ -234,6 +234,7 @@ target_link_libraries(interface_test_node
 ## Python 脚本：安装到 lib/<pkg>/，devel 下可直接 rosrun
 catkin_install_python(PROGRAMS
   scripts/tf.py
+  scripts/add_points2bag.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

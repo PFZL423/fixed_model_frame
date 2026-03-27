@@ -1,0 +1,38 @@
+# TUM RGB-D bag → 带 XYZRGB 的 PointCloud2 bag（供 plane_test / dual_node_system 订阅）
+#
+# 用法示例：
+#   rosrun PlaneDetect add_points2bag.py --config $(rospack find PlaneDetect)/config/add_points2bag_tum.yaml /path/to/tum.bag
+#   rosrun PlaneDetect add_points2bag.py --config ... /path/in.bag /path/out.bag
+#
+# TUM 深度图：16 位，depth_scale 像素值 = 1 米（默认 5000）
+# 生成点云话题默认 /camera/depth/points，与下方 plane_detection_tum_rgbd.yaml 中 input_topic 对齐
+
+# 输入/输出（可在命令行覆盖）
+input_bag: "cabinet.bag"
+output_bag: "cabinet_points.bag"
+
+# 与常见 TUM→ROS bag 话题一致（若你的 bag 不同，请改这里）
+topics:
+  depth_image: "/camera/depth/image"
+  rgb_image: "/camera/rgb/image_color"
+  depth_camera_info: "/camera/depth/camera_info"
+  rgb_camera_info: "/camera/rgb/camera_info"
+output_pointcloud: "/camera/depth/points"
+
+# 深度：TUM 为 5000 表示 1m；若你的数据为毫米整数且 1=1mm 则用 1000.0 等
+depth_scale: 1.0
+# RGB/深度时间戳最大允许偏差（秒）
+sync_slop_sec: 0.033
+# 每隔 N 帧输出一点云（1=全输出）
+nth_frame: 1
+start_sec: 0.0
+# 留空表示处理到 bag 结束
+duration_sec: null
+
+# 是否把原 bag 里其它话题一并写入（true：完整副本 + 点云；false：仅 tf/tf_static + 点云，体积更小）
+passthrough_all: true
+
+# 去掉 frame_id / TF 里前导 '/'，避免 RViz Fixed Frame 匹配问题
+strip_leading_slash: true
+# 非空则覆盖点云 header.frame_id（否则沿用深度图消息的 frame，已 strip）
+pointcloud_frame_id: ""

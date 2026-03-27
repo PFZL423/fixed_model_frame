@@ -1,7 +1,7 @@
 # PlaneDetect配置参数
 # 体素降采样参数
 enable_voxel_filter: true # 是否启用体素降采样
-voxel_leaf_size: 0.02 # 体素大小 (m)
+voxel_leaf_size: 0 # 体素大小 (m)
 
 # 离群点移除参数
 enable_outlier_removal: false # 是否启用离群点移除
@@ -14,7 +14,7 @@ outlier_std_dev_thresh: 1.0 # 标准差倍数阈值
 # 可选强度：intensity（优先）；若无则用 reflectivity；皆无则 GPUPoint3f.intensity=0。
 # rgb / r / g / b / rgba 不读取（XYZRGB 等彩色点云仅几何参与检测，颜色丢弃）。
 # 输出话题（如 remaining_cloud）仍为 PointXYZI 语义：强度来自上列字段或 0。
-input_topic: "/cloud_pcd" # 输入点云话题
+input_topic: "/camera/depth/points"
 output_frame: "map" # 输出坐标系
 
 # ========== Plane Visualization (Aesthetics) ==========
@@ -36,8 +36,8 @@ plane_hull_padding: 0.02
 
 # PlaneDetect算法核心参数
 min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
-plane_distance_threshold: 0.05 # 平面内点距离阈值 (m)
-min_plane_inlier_count_absolute: 35000 # 有效模型的最小内点数(绝对值)
+plane_distance_threshold: 0.08 # 平面内点距离阈值 (m)
+min_plane_inlier_count_absolute: 20000 # 有效模型的最小内点数(绝对值)
 plane_max_iterations: 1000 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
 batch_size: 512 # GPU批处理大小

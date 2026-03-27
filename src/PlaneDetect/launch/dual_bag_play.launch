@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- catkin 下 $(find PlaneDetect) 常为 devel/share/PlaneDetect，需 ../../../ 才到工作空间根；
+       若 rospack 指到 src/PlaneDetect，请显式传 workspace_root:=/你的/ws 根目录 -->
+  <arg name="workspace_root" default="$(find PlaneDetect)/../../.." />
+  <arg name="bag1" default="$(arg workspace_root)/1.bag" />
+  <arg name="bag2" default="$(arg workspace_root)/2.bag" />
+  <!-- 与 RViz、第二路 play 配合：仅 bag1 发 /clock，避免两路 rosbag 抢时钟 -->
+  <arg name="use_sim_time" default="true" />
+  <!-- 若两袋录制时间轴不一致，可改为 false，两路均按墙钟节奏回放 -->
+  <arg name="launch_rviz" default="true" />
+
+  <param name="/use_sim_time" value="$(arg use_sim_time)" />
+
+  <node pkg="rosbag" type="play" name="rosbag_play_bag1" output="screen"
+        args="--clock $(arg bag1) /plane_markers:=/bag1/plane_markers /quadric_markers:=/bag1/quadric_markers" />
+
+  <node pkg="rosbag" type="play" name="rosbag_play_bag2" output="screen"
+        args="$(arg bag2) /plane_markers:=/bag2/plane_markers /quadric_markers:=/bag2/quadric_markers" />
+
+  <node if="$(arg launch_rviz)" name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find PlaneDetect)/config/dual_bag_markers.rviz"
+        output="screen" />
+</launch>

@@ -1,0 +1,60 @@
+# 订阅 add_points2bag.py 生成的 XYZRGB PointCloud2（TUM 管线）
+# 用法：dual_node_system.launch 里将 plane_detection.yaml 换为本文件，或：
+#   roslaunch PlaneDetect dual_node_system.launch  （需改 launch 加载本 yaml）
+#
+# 几何仍走 Raw→GPU；rgb 字段不参与检测，仅可随 bag 存在。
+
+input_topic: "/camera/depth/points"
+output_frame: "camera_rgb_optical_frame"
+
+# 以下为与 plane_detection.yaml 对齐的默认参数（可按需删减，仅列关键项）
+enable_voxel_filter: true
+voxel_leaf_size: 0.02
+enable_outlier_removal: false
+outlier_k_neighbors: 50
+outlier_std_dev_thresh: 1.0
+
+min_remaining_points_percentage: 0.03
+plane_distance_threshold: 0.08
+min_plane_inlier_count_absolute: 100000
+plane_max_iterations: 1000
+min_plane_inlier_percentage: 0.05
+batch_size: 512
+verbosity: 1
+ransac_coarse_ratio: 0.02
+ransac_fine_k: 20
+
+enable_supervoxel: false
+min_remaining_points_for_supervoxel: 5000
+
+enable_visualization: true
+enable_plane_visualization: true
+enable_convex_hull_visualization: true
+enable_quadric_visualization: true
+
+enable_quadric: true
+min_remaining_points_for_quadric: 20000
+quadric_min_remaining_points_percentage: 0.1
+quadric_distance_threshold: 0.1
+min_quadric_inlier_count_absolute: 100000
+quadric_max_iterations: 300
+min_quadric_inlier_percentage: 0.05
+quadric_verbosity: 0
+
+sv_voxel_resolution: 0.2
+sv_seed_resolution: 0.8
+sv_color_importance: 0.2
+sv_spatial_importance: 0.4
+sv_normal_importance: 1.0
+sv_enable_voxel_downsample: false
+sv_downsample_leaf_size: 0.02
+sv_use_2d_convex_hull: true
+sv_min_points_for_hull: 3
+
+plane_color_scheme: "pastel"
+plane_checkerboard: true
+plane_alpha: 0.65
+plane_grid_size: 24
+plane_clip_to_hull: true
+plane_hull_smooth_factor: 0.15
+plane_hull_padding: 0.02
