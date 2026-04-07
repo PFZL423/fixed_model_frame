@@ -34,3 +34,7 @@ cmake_install.cmake
 .idea/
 .DS_Store
 *.bag
+
+external/
+*.pdf
+.claudeignore

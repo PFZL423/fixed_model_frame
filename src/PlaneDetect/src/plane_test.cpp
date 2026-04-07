@@ -22,6 +22,7 @@
 #include "super_voxel/supervoxel.h"
 #include "gpu_demo/GPUPreprocessor.h"
 #include "gpu_demo/QuadricDetect.h"
+#include "gpu_demo/MeshVisualization.h"
 #include <cuda_runtime.h>
 #include <memory>
 
@@ -107,6 +108,13 @@ private:
     bool plane_clip_to_hull_ = true;             // 是否裁剪到内点凸包
     double plane_hull_padding_ = 0.02;           // 凸包外扩（米）
     double plane_hull_smooth_factor_ = 0.15;     // 轻度平滑 [0,1]
+
+    // 凹包 + Delaunay 网格可视化（与 MeshVisualization 一致）
+    bool viz_use_concave_mesh_ = true;
+    double viz_concave_alpha_ = 0.08;
+    double viz_delaunay_max_edge_ = 2.0;
+    double viz_sliver_max_edge_ratio_ = 28.0;
+    bool viz_clip_hull_vertices_ = true;
     
     // 🆕 二次曲面可视化参数
     bool enable_quadric_visualization_ = true;   // 是否启用二次曲面可视化
@@ -115,6 +123,9 @@ private:
     bool enable_outlier_removal_;
     int outlier_k_neighbors_;
     double outlier_std_dev_thresh_;
+
+    // 体素密度过滤
+    int voxel_min_points_ = 0;
 
     // 超体素功能开关
     bool enable_supervoxel_;
@@ -135,6 +146,7 @@ private:
         pnh_.param("enable_outlier_removal", enable_outlier_removal_, true);
         pnh_.param("outlier_k_neighbors", outlier_k_neighbors_, 50);
         pnh_.param("outlier_std_dev_thresh", outlier_std_dev_thresh_, 1.0);
+        pnh_.param("voxel_min_points", voxel_min_points_, 0);
 
         // 话题和坐标系参数
     pnh_.param<std::string>("input_topic", input_topic_, "/camera/depth_registered/points");
@@ -148,6 +160,12 @@ private:
     pnh_.param("plane_clip_to_hull", plane_clip_to_hull_, plane_clip_to_hull_);
     pnh_.param("plane_hull_padding", plane_hull_padding_, plane_hull_padding_);
     pnh_.param("plane_hull_smooth_factor", plane_hull_smooth_factor_, plane_hull_smooth_factor_);
+
+    pnh_.param("viz_use_concave_mesh", viz_use_concave_mesh_, viz_use_concave_mesh_);
+    pnh_.param("viz_concave_alpha", viz_concave_alpha_, viz_concave_alpha_);
+    pnh_.param("viz_delaunay_max_edge", viz_delaunay_max_edge_, viz_delaunay_max_edge_);
+    pnh_.param("viz_sliver_max_edge_ratio", viz_sliver_max_edge_ratio_, viz_sliver_max_edge_ratio_);
+    pnh_.param("viz_clip_hull_vertices", viz_clip_hull_vertices_, viz_clip_hull_vertices_);
 
         // PlaneDetect算法参数
         pnh_.param("min_remaining_points_percentage", detector_params_.min_remaining_points_percentage, 0.03);
@@ -372,6 +390,7 @@ private:
         gpu_config.statistical_k = outlier_k_neighbors_;
         gpu_config.statistical_stddev = static_cast<float>(outlier_std_dev_thresh_);
         gpu_config.compute_normals = false;  // 平面检测不需要法线
+        gpu_config.voxel_min_points = voxel_min_points_;  // 体素密度过滤
 
         // ========== 执行 GPU 预处理（Raw Data解析）==========
         auto gpu_preprocess_start = std::chrono::high_resolution_clock::now();
@@ -434,6 +453,13 @@ private:
 
         // ========== Step 4: 二次曲面检测（零拷贝）==========
         auto quadric_detect_start = std::chrono::high_resolution_clock::now();
+        // 方案C：将体素序号传给 QuadricDetect，启用体素约束采样
+        if (enable_voxel_filter_)
+        {
+            auto voxel_ids = gpu_preprocessor_->getOutputVoxelIds();
+            if (!voxel_ids.empty())
+                quadric_detector_->setVoxelIds(voxel_ids);
+        }
         bool quadric_success = quadric_detector_->processCloudDirect(d_rem_ptr, rem_count);
         auto quadric_detect_end = std::chrono::high_resolution_clock::now();
         float quadric_detect_time = std::chrono::duration<float, std::milli>(
@@ -525,14 +551,21 @@ private:
             
             if (enable_visualization_ && enable_quadric_visualization_) {
                 visualization_msgs::MarkerArray quadric_markers;
+                std_msgs::Header viz_header = msg->header;
+                viz_header.frame_id = output_frame_;
                 for (size_t i = 0; i < detected_quadrics.size(); ++i) {
                     const auto &quadric = detected_quadrics[i];
                     if (quadric.has_visualization_data) {
                         quadric_detector_->computeVisualizationMarkers(
-                            quadric, quadric_markers, msg->header,
+                            quadric, quadric_markers, viz_header,
                             plane_grid_size_ * 0.01f,
                             static_cast<float>(plane_alpha_),
-                            plane_clip_to_hull_);
+                            plane_clip_to_hull_,
+                            viz_use_concave_mesh_,
+                            viz_concave_alpha_,
+                            viz_delaunay_max_edge_,
+                            viz_sliver_max_edge_ratio_,
+                            viz_clip_hull_vertices_);
                     } else {
                         ROS_WARN("Quadric %zu: no visualization data, skip marker", i + 1);
                     }
@@ -605,6 +638,50 @@ private:
         std::cout << "----------------------------------------" << std::endl;
     }
 
+    /// 凹包 + Delaunay 平面三角网（与 generatePlaneVisualizationHull 共用 (u,v) 基）
+    bool tryPlaneConcaveMesh(const DetectedPrimitive<pcl::PointXYZI> &plane,
+                             const std_msgs::Header &header,
+                             visualization_msgs::Marker &marker)
+    {
+        if (!plane.inliers || plane.inliers->size() < 3)
+            return false;
+        const float A = plane.model_coefficients[0];
+        const float B = plane.model_coefficients[1];
+        const float C = plane.model_coefficients[2];
+        const float nlen = std::sqrt(A * A + B * B + C * C);
+        if (nlen < 1e-6f)
+            return false;
+        Eigen::Vector3f n(A / nlen, B / nlen, C / nlen);
+        Eigen::Vector3f p0(0, 0, 0);
+        for (const auto &pt : plane.inliers->points)
+            p0 += Eigen::Vector3f(pt.x, pt.y, pt.z);
+        p0 /= static_cast<float>(plane.inliers->size());
+        Eigen::Vector3f ref =
+            (std::fabs(n.z()) < 0.9f) ? Eigen::Vector3f(0, 0, 1) : Eigen::Vector3f(1, 0, 0);
+        Eigen::Vector3f u = n.cross(ref);
+        float ul = u.norm();
+        if (ul < 1e-6f)
+            return false;
+        u /= ul;
+        Eigen::Vector3f v = n.cross(u);
+        v.normalize();
+
+        mesh_viz::MeshVizParams p;
+        p.use_concave_mesh = true;
+        p.concave_alpha = viz_concave_alpha_;
+        p.delaunay_max_edge = viz_delaunay_max_edge_;
+        p.sliver_max_edge_ratio = viz_sliver_max_edge_ratio_;
+        p.mesh_alpha = static_cast<float>(plane_alpha_);
+        p.clip_to_hull = plane_clip_to_hull_;
+        p.clip_hull_vertices_inside = viz_clip_hull_vertices_;
+
+        std_msgs::Header h = header;
+        h.frame_id = output_frame_;
+        marker.points.clear();
+        marker.colors.clear();
+        return mesh_viz::buildPlaneVisualizationMarker(plane.inliers, p0, u, v, n, h, p, marker);
+    }
+
     void visualizePlanes(const std::vector<DetectedPrimitive<pcl::PointXYZI>> &planes,
                          const std_msgs::Header &header)
     {
@@ -660,11 +737,18 @@ private:
             plane_marker.type = visualization_msgs::Marker::TRIANGLE_LIST;
             plane_marker.action = visualization_msgs::Marker::ADD;
 
-            // 计算平面的可视化网格（优先使用内点凸包裁剪）
+            // 计算平面的可视化网格（优先凹包+Delaunay，否则单调链凸包+网格，再回退矩形）
             bool hull_done = false;
             if (plane_clip_to_hull_)
             {
-                hull_done = generatePlaneVisualizationHull(plane, plane_marker);
+                if (viz_use_concave_mesh_)
+                {
+                    hull_done = tryPlaneConcaveMesh(plane, header, plane_marker);
+                }
+                if (!hull_done)
+                {
+                    hull_done = generatePlaneVisualizationHull(plane, plane_marker);
+                }
             }
             if (!hull_done)
             {
@@ -672,19 +756,29 @@ private:
                 generatePlaneVisualization(plane, plane_marker);
             }
 
-            // 设置颜色（更美观的配色与透明度）
+            // 设置颜色（更美观的配色与透明度）；凹包网格已带逐顶点 colors 时跳过底色
             auto base = chooseColor(i);
-            plane_marker.color.r = base[0];
-            plane_marker.color.g = base[1];
-            plane_marker.color.b = base[2];
-            plane_marker.color.a = static_cast<float>(std::max(0.0, std::min(1.0, plane_alpha_)));
+            if (plane_marker.colors.empty())
+            {
+                plane_marker.color.r = base[0];
+                plane_marker.color.g = base[1];
+                plane_marker.color.b = base[2];
+                plane_marker.color.a = static_cast<float>(std::max(0.0, std::min(1.0, plane_alpha_)));
+            }
+            else
+            {
+                plane_marker.color.r = 1.0f;
+                plane_marker.color.g = 1.0f;
+                plane_marker.color.b = 1.0f;
+                plane_marker.color.a = static_cast<float>(std::max(0.0, std::min(1.0, plane_alpha_)));
+            }
 
             plane_marker.scale.x = 1.0;
             plane_marker.scale.y = 1.0;
             plane_marker.scale.z = 1.0;
 
             // 可选：棋盘纹理（基于平面局部UV网格的方格着色，避免“辐射状”）
-            if (plane_checkerboard_ && !plane_marker.points.empty())
+            if (plane_checkerboard_ && !plane_marker.points.empty() && plane_marker.colors.empty())
             {
                 // 计算局部平面坐标系与参考中心
                 const float A = plane.model_coefficients[0];
@@ -928,7 +1022,7 @@ private:
         }
         if (pts.size() < 3) return false;
 
-        // 固定 2σ 径向预过滤（相对 (u,v) 质心即原点），再单调链凸包；过滤过严则回退全量点
+        // 固定 1.5σ 径向预过滤（相对 (u,v) 质心即原点），再单调链凸包；过滤过严则回退全量点
         {
             std::vector<float> dists;
             dists.reserve(pts.size());
@@ -947,7 +1041,7 @@ private:
             }
             var_d /= static_cast<float>(dists.size());
             float sigma_d = std::sqrt(var_d);
-            const float thresh = mean_d + 2.0f * sigma_d;
+            const float thresh = mean_d + 1.5f * sigma_d;
             std::vector<P2> pts_filtered;
             pts_filtered.reserve(pts.size());
             for (size_t i = 0; i < pts.size(); ++i) {

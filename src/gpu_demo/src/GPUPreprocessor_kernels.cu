@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 
+#include <ros/ros.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <thrust/sort.h>
@@ -317,6 +318,12 @@ void GPUPreprocessor::cuda_initializeMemory(size_t max_points)
         d_min_max_keys_.resize(2);
     }
 }
+
+void GPUPreprocessor::copyTempPointsFromInput()
+{
+    d_temp_points_ = d_input_points_;
+}
+
 void GPUPreprocessor::cuda_launchVoxelFilter(float voxel_size)
 {
     auto total_start = std::chrono::high_resolution_clock::now();
@@ -683,11 +690,6 @@ bool GPUPreprocessor::cpuFallbackSort(size_t input_count)
 // 将后续处理拆分为独立函数
 void GPUPreprocessor::processVoxelCentroids(size_t input_count)
 {
-    //  调试信息：检查输入数据
-    std::cout << "[DEBUG] processVoxelCentroids input_count=" << input_count
-              << ", d_temp_points_.size()=" << d_temp_points_.size()
-              << ", d_voxel_keys_.size()=" << d_voxel_keys_.size() << std::endl;
-
     // 确保输入数据一致性
     if (d_temp_points_.size() != input_count || d_voxel_keys_.size() != input_count)
     {
@@ -695,21 +697,22 @@ void GPUPreprocessor::processVoxelCentroids(size_t input_count)
         return;
     }
 
-    // Step 3: 计算体素质心
+    // Step 1: 统计每个体素的原始点数 + 累加坐标
     thrust::device_vector<int> d_point_counts(input_count);
     thrust::device_vector<int> d_ones(input_count, 1);
 
     d_unique_keys_.resize(input_count);
     thrust::device_vector<GPUPoint3f> d_temp_centroids(input_count);
 
-    // reduce_by_key计算
+    // reduce_by_key：统计点数
     auto count_end = thrust::reduce_by_key(
         d_voxel_keys_.begin(), d_voxel_keys_.begin() + input_count,
         d_ones.begin(),
         d_unique_keys_.begin(),
         d_point_counts.begin());
 
-    auto sum_end = thrust::reduce_by_key(
+    // reduce_by_key：累加坐标
+    thrust::reduce_by_key(
         d_voxel_keys_.begin(), d_voxel_keys_.begin() + input_count,
         d_temp_points_.begin(),
         d_unique_keys_.begin(),
@@ -717,12 +720,10 @@ void GPUPreprocessor::processVoxelCentroids(size_t input_count)
         thrust::equal_to<uint64_t>(),
         [] __device__(const GPUPoint3f &a, const GPUPoint3f &b)
         {
-            return GPUPoint3f{a.x + b.x, a.y + b.y, a.z + b.z};
+            return GPUPoint3f{a.x + b.x, a.y + b.y, a.z + b.z, a.intensity + b.intensity};
         });
 
     size_t unique_count = count_end.second - d_point_counts.begin();
-
-    std::cout << "Found " << unique_count << " unique voxels" << std::endl;
 
     if (unique_count == 0)
     {
@@ -732,36 +733,70 @@ void GPUPreprocessor::processVoxelCentroids(size_t input_count)
         return;
     }
 
-    // Step 4: 计算平均值
+    // Step 2: 计算质心（坐标 / 点数）
     thrust::transform(
         d_temp_centroids.begin(), d_temp_centroids.begin() + unique_count,
         d_point_counts.begin(),
         d_temp_centroids.begin(),
         [] __device__(const GPUPoint3f &sum_point, int count)
         {
-            float inv_count = 1.0f / count;
-            return GPUPoint3f{
-                sum_point.x * inv_count,
-                sum_point.y * inv_count,
-                sum_point.z * inv_count};
+            float inv = 1.0f / count;
+            return GPUPoint3f{sum_point.x * inv, sum_point.y * inv,
+                              sum_point.z * inv, sum_point.intensity * inv};
         });
 
-    // 安全地更新输出
-    if (unique_count > 0)
+    // Step 3: 体素密度过滤（voxel_min_points > 0 时启用）
+    // d_voxel_min_points_ 通过 last_voxel_min_points_ 成员传入
+    size_t output_count = unique_count;
+    if (last_voxel_min_points_ > 0)
+    {
+        // 用 copy_if 保留 count >= threshold 的质心（保持 key 有序）
+        thrust::device_vector<GPUPoint3f> d_filtered(unique_count);
+        // 同时过滤出对应的序号（0..unique_count-1）
+        thrust::device_vector<int> d_seq(unique_count);
+        thrust::sequence(d_seq.begin(), d_seq.end(), 0);
+        thrust::device_vector<int> d_filtered_ids(unique_count);
+
+        auto end_pts = thrust::copy_if(
+            d_temp_centroids.begin(), d_temp_centroids.begin() + unique_count,
+            d_point_counts.begin(),
+            d_filtered.begin(),
+            [min_pts = last_voxel_min_points_] __device__(int cnt) {
+                return cnt >= min_pts;
+            });
+        auto end_ids = thrust::copy_if(
+            d_seq.begin(), d_seq.begin() + unique_count,
+            d_point_counts.begin(),
+            d_filtered_ids.begin(),
+            [min_pts = last_voxel_min_points_] __device__(int cnt) {
+                return cnt >= min_pts;
+            });
+        output_count = end_pts - d_filtered.begin();
+
+        thrust::host_vector<GPUPoint3f> h_result(output_count);
+        thrust::host_vector<int> h_ids(output_count);
+        if (output_count > 0)
+        {
+            thrust::copy_n(d_filtered.begin(), output_count, h_result.begin());
+            thrust::copy_n(d_filtered_ids.begin(), output_count, h_ids.begin());
+        }
+        d_output_points_ = h_result;
+        h_output_voxel_ids_.assign(h_ids.begin(), h_ids.end());
+    }
+    else
     {
         thrust::host_vector<GPUPoint3f> h_result(unique_count);
         thrust::copy_n(d_temp_centroids.begin(), unique_count, h_result.begin());
         d_output_points_ = h_result;
-        d_temp_points_ = d_output_points_;
+        // 体素序号就是 0..unique_count-1（有序）
+        h_output_voxel_ids_.resize(unique_count);
+        for (size_t i = 0; i < unique_count; ++i) h_output_voxel_ids_[i] = (int)i;
+    }
 
-        std::cout << "[GPUPreprocessor] Voxel filter: " << input_count
-                  << " -> " << unique_count << " points" << std::endl;
-    }
-    else
-    {
-        d_output_points_.clear();
-        d_temp_points_.clear();
-    }
+    d_temp_points_ = d_output_points_;
+
+    ROS_INFO("[GPUPreprocessor] Voxel filter: %zu raw -> %zu voxels -> %zu after density filter (min_pts=%d)",
+             input_count, unique_count, output_count, last_voxel_min_points_);
 }
 
 void GPUPreprocessor::cuda_launchOutlierRemoval(const PreprocessConfig &config)

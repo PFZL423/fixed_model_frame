@@ -191,13 +191,14 @@ ProcessingResult GPUPreprocessor::processRawMsg(
 
 void GPUPreprocessor::preprocessOnGPU(const PreprocessConfig &config)
 {
-    // 初始化工作点云
-    d_temp_points_ = d_input_points_;
+    // 初始化工作点云（Thrust D→D 赋值仅在 .cu 中实例化）
+    copyTempPointsFromInput();
 
     // Step 1: 体素下采样
     if (config.enable_voxel_filter)
     {
         auto start = std::chrono::high_resolution_clock::now();
+        last_voxel_min_points_ = config.voxel_min_points;  // 传递密度过滤阈值
         cuda_launchVoxelFilter(config.voxel_size);
         auto end = std::chrono::high_resolution_clock::now();
         last_stats_.voxel_filter_time_ms = std::chrono::duration<float, std::milli>(end - start).count();
@@ -288,9 +289,18 @@ std::vector<GPUPoint3f> ProcessingResult::downloadPoints() const
 {
     if (!d_points_)
         return {};
-
-    thrust::host_vector<GPUPoint3f> host_points = *d_points_;
-    return std::vector<GPUPoint3f>(host_points.begin(), host_points.end());
+    const size_t n = d_points_->size();
+    if (n == 0)
+        return {};
+    std::vector<GPUPoint3f> out(n);
+    cudaError_t err = cudaMemcpy(
+        out.data(),
+        thrust::raw_pointer_cast(d_points_->data()),
+        n * sizeof(GPUPoint3f),
+        cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess)
+        return {};
+    return out;
 }
 
 std::vector<GPUPointNormal3f> ProcessingResult::downloadPointsWithNormals() const

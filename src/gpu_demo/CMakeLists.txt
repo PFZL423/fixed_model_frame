@@ -11,6 +11,8 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   cv_bridge
   tf2_msgs
+  visualization_msgs
+  geometry_msgs
 )
 
 ## System dependencies
@@ -19,6 +21,7 @@ find_package(PCL 1.8 REQUIRED COMPONENTS
   io
   filters
   sample_consensus
+  surface
 )
 find_package(CUDA REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -48,7 +51,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftemplate-backtrace-limit=5")
 catkin_package(
  INCLUDE_DIRS include
  LIBRARIES quadric_detect_gpu_lib gpu_preprocessor_lib
- CATKIN_DEPENDS roscpp std_msgs pcl_ros sensor_msgs rosbag rospy cv_bridge tf2_msgs
+ CATKIN_DEPENDS roscpp std_msgs pcl_ros sensor_msgs rosbag rospy cv_bridge tf2_msgs visualization_msgs geometry_msgs
  DEPENDS PCL OpenCV
 )
 
@@ -72,6 +75,7 @@ add_definitions(${PCL_DEFINITIONS})
 add_library(quadric_detect_gpu_lib
   src/QuadricDetect.cpp
   src/QuadricDetect.cu
+  src/MeshVisualization.cpp
 )
 
 ## 🆕 新增：GPU预处理库
@@ -101,6 +105,7 @@ target_compile_options(gpu_preprocessor_lib PRIVATE
 target_link_libraries(quadric_detect_gpu_lib
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
   ${CUDA_LIBRARIES}
   cusolver  # cuSolver for batch SVD
   curand    # cuRAND for random number generation

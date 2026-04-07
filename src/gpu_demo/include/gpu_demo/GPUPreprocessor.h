@@ -47,6 +47,9 @@ struct PreprocessConfig
     // 其他选项
     bool enable_ground_removal = false;
     float ground_threshold = 0.02f;
+
+    // 体素密度过滤（在质心输出前，丢弃原始点数不足的体素）
+    int voxel_min_points = 0;  // 0 = 关闭；>0 = 体素内原始点数少于此值则丢弃
 };
 
 // 处理结果包装类
@@ -191,6 +194,14 @@ public:
 
     void processVoxelCentroids(size_t input_count);
 
+    // 获取输出点对应的体素序号（0-based，单调不减）
+    // 仅在 enable_voxel_filter=true 时有效，否则返回空 vector。
+    std::vector<int> getOutputVoxelIds() const
+    {
+        if (h_output_voxel_ids_.empty()) return {};
+        return h_output_voxel_ids_;
+    }
+
 private:
     // CPU端锁页内存缓冲区（预分配，DMA直接访问）
     GPUPoint3f* h_pinned_buffer_;
@@ -199,6 +210,12 @@ private:
     // CUDA流（用于异步操作和流隔离）
     cudaStream_t stream_;
     bool owns_stream_;  ///< 是否拥有stream的所有权
+
+    // 体素密度过滤参数（由 preprocessOnGPU 在调用 processVoxelCentroids 前设置）
+    int last_voxel_min_points_ = 0;
+
+    // 体素序号输出（方案C，与 d_output_points_ 对齐）
+    std::vector<int> h_output_voxel_ids_;
 
     // GPU内存缓冲区
     thrust::device_vector<GPUPoint3f> d_input_points_;
@@ -236,6 +253,9 @@ private:
     // 内部处理流程
     void preprocessOnGPU(const PreprocessConfig &config);
     ProcessingResult createResult(const PreprocessConfig &config);
+
+    /// D→D 设备向量拷贝（在 GPUPreprocessor_kernels.cu 中实现，避免 g++ 编译 .cpp 时 thrust::cuda_cub::copy 未解析）
+    void copyTempPointsFromInput();
 
     // 独立转换函数（返回转换的点数，数据直接写入 h_pinned_buffer_）
     size_t convertPCLToGPU(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cpu_cloud);

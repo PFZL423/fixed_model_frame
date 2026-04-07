@@ -1,7 +1,8 @@
 # PlaneDetect配置参数
 # 体素降采样参数
 enable_voxel_filter: true # 是否启用体素降采样
-voxel_leaf_size: 0 # 体素大小 (m)
+voxel_leaf_size: 0.02 # 体素大小 (m)
+voxel_min_points: 2 # 体素内原始点数少于此值则丢弃（0=关闭，建议2~5）
 
 # 离群点移除参数
 enable_outlier_removal: false # 是否启用离群点移除
@@ -14,7 +15,7 @@ outlier_std_dev_thresh: 1.0 # 标准差倍数阈值
 # 可选强度：intensity（优先）；若无则用 reflectivity；皆无则 GPUPoint3f.intensity=0。
 # rgb / r / g / b / rgba 不读取（XYZRGB 等彩色点云仅几何参与检测，颜色丢弃）。
 # 输出话题（如 remaining_cloud）仍为 PointXYZI 语义：强度来自上列字段或 0。
-input_topic: "/camera/depth/points"
+input_topic: "/cloud_pcd"
 output_frame: "map" # 输出坐标系
 
 # ========== Plane Visualization (Aesthetics) ==========
@@ -23,7 +24,7 @@ plane_color_scheme: "pastel"
 # 是否对平面三角网格应用棋盘式交替着色，增强纹理感
 plane_checkerboard: true
 # 平面透明度 [0,1]
-plane_alpha: 0.65
+plane_alpha: 0.75
 # 可视化网格密度（越大越细，20≈默认，建议范围 8~60）
 plane_grid_size: 24
 
@@ -49,7 +50,7 @@ ransac_fine_k: 20 # 精选阶段候选模型数量
 
 # ========== Supervoxel Processing ==========
 enable_supervoxel: false # 是否启用超体素处理（默认关闭，测试时设为 true）
-min_remaining_points_for_supervoxel: 5000 # 最小点数阈值
+min_remaining_points_for_supervoxel: 7000 # 最小点数阈值
 
 # ========== Visualization Toggles ==========
 enable_visualization: true
@@ -57,14 +58,25 @@ enable_plane_visualization: true
 enable_convex_hull_visualization: true
 enable_quadric_visualization: true
 
+# 凹包 + Delaunay 网格（平面/二次曲面共用；失败自动回退旧网格）
+viz_use_concave_mesh: true
+# PCL ConcaveHull alpha（米），过小易失败
+viz_concave_alpha: 0.08
+# Delaunay 三角形最大边长（米），抑制跨空长边
+viz_delaunay_max_edge: 0.8
+# 最长边/最短边比上限，剔除细长三角（边缘毛刺）；≤0 关闭；略降更严（如 22），略升更松（如 36）
+viz_sliver_max_edge_ratio: 36.0
+# 凹包裁剪：true=三顶点均在凹包内（默认，边缘更整）；false=仅重心在内（旧行为，凹边界易穿孔）
+viz_clip_hull_vertices: false
+
 # ========== Quadric Detection ==========
 enable_quadric: true # 是否启用二次曲面检测
 min_remaining_points_for_quadric: 20000 # 二次曲面检测的最小点数阈值
 
 # QuadricDetect算法参数
 quadric_min_remaining_points_percentage: 0.1 # 剩余点数阈值(相对于总点数)
-quadric_distance_threshold: 0.1 # 二次曲面内点距离阈值 (m)
-min_quadric_inlier_count_absolute: 20000 # 有效模型的最小内点数(绝对值)
+quadric_distance_threshold: 0.10 # 二次曲面内点距离阈值 (m)
+min_quadric_inlier_count_absolute: 8000 # 有效模型的最小内点数(绝对值)
 quadric_max_iterations: 300 # RANSAC最大迭代次数（降低负载）
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
 quadric_verbosity: 0 # 0=静默 1=每帧一行摘要 2=迭代/采样详细日志

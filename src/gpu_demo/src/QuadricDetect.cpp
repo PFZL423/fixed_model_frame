@@ -1,8 +1,10 @@
 #include "gpu_demo/QuadricDetect.h"
 #include "gpu_demo/QuadricDetect_kernels.cuh"
+#include "gpu_demo/MeshVisualization.h"
 #include <pcl/common/io.h>
-#include <thrust/copy.h>
+#include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
+#include <vector>
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -57,10 +59,7 @@ bool QuadricDetect::processCloud(const pcl::PointCloud<pcl::PointXYZI>::ConstPtr
 
     //  关键修复：清空所有GPU状态（防止多帧复用时的数据残留）
     detected_primitives_.clear();
-    d_batch_inlier_counts_.clear();
-    d_batch_models_.clear();
-    d_best_model_index_.clear();
-    d_best_model_count_.clear();
+    clearDeviceQuadricBatchVectors(false);
     
     // Step 1: PCL转换和GPU上传
     auto convert_start = std::chrono::high_resolution_clock::now();
@@ -233,17 +232,22 @@ void QuadricDetect::findQuadrics_BatchGPU()
             const int debug_model_count = std::min(3, batch_size);
             std::cout << "[QuadricDetect] 计算前 " << debug_model_count << " 个模型的距离统计..." << std::endl;
             
-            // 获取前几个模型
-            thrust::host_vector<GPUQuadricModel> h_models(debug_model_count);
-            thrust::copy_n(d_batch_models_.begin(), debug_model_count, h_models.begin());
+            // 获取前几个模型（cudaMemcpy，避免 g++ 中 thrust::copy_n 未解析）
+            std::vector<GPUQuadricModel> h_models(static_cast<size_t>(debug_model_count));
+            if (debug_model_count > 0)
+            {
+                cudaMemcpy(h_models.data(), thrust::raw_pointer_cast(d_batch_models_.data()),
+                           static_cast<size_t>(debug_model_count) * sizeof(GPUQuadricModel),
+                           cudaMemcpyDeviceToHost);
+            }
             
             // 获取一些采样点来计算距离
             const int sample_point_count = std::min(100, static_cast<int>(d_remaining_indices_.size()));
-            thrust::host_vector<GPUPoint3f> h_sample_points(sample_point_count);
+            std::vector<GPUPoint3f> h_sample_points(static_cast<size_t>(sample_point_count));
             GPUPoint3f* points_ptr = getPointsPtr();
             cudaMemcpy(h_sample_points.data(),
                        &points_ptr[0],
-                       sample_point_count * sizeof(GPUPoint3f),
+                       static_cast<size_t>(sample_point_count) * sizeof(GPUPoint3f),
                        cudaMemcpyDeviceToHost);
             
             for (int model_id = 0; model_id < debug_model_count; ++model_id)
@@ -296,7 +300,11 @@ void QuadricDetect::findQuadrics_BatchGPU()
                     std::cout << "    最大距离: " << max_dist << " m" << std::endl;
                     std::cout << "    平均距离: " << avg_dist << " m" << std::endl;
                     std::cout << "    阈值: " << params_.quadric_distance_threshold << " m" << std::endl;
-                    std::cout << "    内点计数: " << (thrust::host_vector<int>(d_batch_inlier_counts_)[model_id]) << std::endl;
+                    int dbg_inlier_cnt = 0;
+                    cudaMemcpy(&dbg_inlier_cnt,
+                               thrust::raw_pointer_cast(d_batch_inlier_counts_.data()) + model_id,
+                               sizeof(int), cudaMemcpyDeviceToHost);
+                    std::cout << "    内点计数: " << dbg_inlier_cnt << std::endl;
                 }
             }
         }
@@ -304,8 +312,12 @@ void QuadricDetect::findQuadrics_BatchGPU()
         // Step 5: 从精选结果中找最优模型
         auto best_model_start = std::chrono::high_resolution_clock::now();
         // 从d_fine_inlier_counts_中找出最大值及其索引
-        thrust::host_vector<int> h_fine_counts(fine_k);
-        thrust::copy_n(d_fine_inlier_counts_.begin(), fine_k, h_fine_counts.begin());
+        std::vector<int> h_fine_counts(static_cast<size_t>(fine_k));
+        if (fine_k > 0)
+        {
+            cudaMemcpy(h_fine_counts.data(), thrust::raw_pointer_cast(d_fine_inlier_counts_.data()),
+                       static_cast<size_t>(fine_k) * sizeof(int), cudaMemcpyDeviceToHost);
+        }
 
         int best_fine_count = 0;
         int best_fine_idx = -1;
@@ -319,8 +331,12 @@ void QuadricDetect::findQuadrics_BatchGPU()
         }
 
         // 获取最优模型在原始batch中的索引
-        thrust::host_vector<int> h_top_k_indices(fine_k);
-        thrust::copy_n(d_top_k_indices_.begin(), fine_k, h_top_k_indices.begin());
+        std::vector<int> h_top_k_indices(static_cast<size_t>(fine_k));
+        if (fine_k > 0)
+        {
+            cudaMemcpy(h_top_k_indices.data(), thrust::raw_pointer_cast(d_top_k_indices_.data()),
+                       static_cast<size_t>(fine_k) * sizeof(int), cudaMemcpyDeviceToHost);
+        }
         int best_model_idx = (best_fine_idx >= 0) ? h_top_k_indices[best_fine_idx] : -1;
         int best_count = best_fine_count;
 
@@ -362,8 +378,12 @@ void QuadricDetect::findQuadrics_BatchGPU()
         }
 
         // Step 6: 获取最优模型（从候选模型中获取）
-        thrust::host_vector<GPUQuadricModel> h_candidate_models(fine_k);
-        thrust::copy_n(d_candidate_models_.begin(), fine_k, h_candidate_models.begin());
+        std::vector<GPUQuadricModel> h_candidate_models(static_cast<size_t>(fine_k));
+        if (fine_k > 0)
+        {
+            cudaMemcpy(h_candidate_models.data(), thrust::raw_pointer_cast(d_candidate_models_.data()),
+                       static_cast<size_t>(fine_k) * sizeof(GPUQuadricModel), cudaMemcpyDeviceToHost);
+        }
         GPUQuadricModel best_gpu_model = h_candidate_models[best_fine_idx];
 
         if (params_.verbosity > 1)
@@ -395,10 +415,14 @@ void QuadricDetect::findQuadrics_BatchGPU()
         
         // 🆕 从GPU缓冲区读取最优模型的显式系数和变换矩阵
         if (best_model_idx >= 0 && best_model_idx < batch_size) {
-            thrust::host_vector<float> h_explicit_coeffs(6);
-            thrust::host_vector<float> h_transform(12);
-            thrust::copy_n(d_batch_explicit_coeffs_.begin() + best_model_idx * 6, 6, h_explicit_coeffs.begin());
-            thrust::copy_n(d_batch_transforms_.begin() + best_model_idx * 12, 12, h_transform.begin());
+            std::vector<float> h_explicit_coeffs(6);
+            std::vector<float> h_transform(12);
+            cudaMemcpy(h_explicit_coeffs.data(),
+                       thrust::raw_pointer_cast(d_batch_explicit_coeffs_.data()) + best_model_idx * 6,
+                       6 * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_transform.data(),
+                       thrust::raw_pointer_cast(d_batch_transforms_.data()) + best_model_idx * 12,
+                       12 * sizeof(float), cudaMemcpyDeviceToHost);
             
             // 保存到DetectedPrimitive
             for (int i = 0; i < 6; ++i) {
@@ -590,15 +614,18 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::getFinalCloud() const
         return final_cloud;
     }
 
-    // 单次拷贝整块数据：从 GPU 连续缓冲区到 CPU
-    thrust::host_vector<GPUPoint3f> h_compact_points;
-    try {
-        h_compact_points = d_compact_inliers_;
-    } catch (const thrust::system_error &e) {
-        std::cerr << "[getFinalCloud]  Thrust拷贝失败: " << e.what() << std::endl;
-        err = cudaGetLastError();
-        std::cerr << "[getFinalCloud] CUDA错误: " << cudaGetErrorString(err) << std::endl;
-        return final_cloud;
+    // 单次拷贝整块数据：从 GPU 连续缓冲区到 CPU（cudaMemcpy，避免 g++ 中 thrust 赋值未解析）
+    const size_t compact_n = d_compact_inliers_.size();
+    std::vector<GPUPoint3f> h_compact_points(compact_n);
+    if (compact_n > 0)
+    {
+        err = cudaMemcpy(h_compact_points.data(), thrust::raw_pointer_cast(d_compact_inliers_.data()),
+                           compact_n * sizeof(GPUPoint3f), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess)
+        {
+            std::cerr << "[getFinalCloud]  cudaMemcpy 失败: " << cudaGetErrorString(err) << std::endl;
+            return final_cloud;
+        }
     }
     
     // 转换为 PCL 点云
@@ -657,11 +684,7 @@ bool QuadricDetect::processCloudDirect(GPUPoint3f* d_points, size_t count)
 
     // 重置内部状态（防止上一帧数据污染）
     detected_primitives_.clear();
-    d_batch_inlier_counts_.clear();
-    d_batch_models_.clear();
-    d_best_model_index_.clear();
-    d_best_model_count_.clear();
-    d_remaining_indices_.clear();
+    clearDeviceQuadricBatchVectors(true);
 
     // 零拷贝指针赋值
     d_external_points_ = d_points;
@@ -735,14 +758,17 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr QuadricDetect::extractInlierCloud() const
     }
 
     // 单次拷贝整块数据：从 GPU 连续缓冲区到 CPU
-    thrust::host_vector<GPUPoint3f> h_compact_inliers;
-    try {
-        h_compact_inliers = d_compact_inliers_;
-    } catch (const thrust::system_error &e) {
-        std::cerr << "[extractInlierCloud]  Thrust拷贝失败: " << e.what() << std::endl;
-        err = cudaGetLastError();
-        std::cerr << "[extractInlierCloud] CUDA错误: " << cudaGetErrorString(err) << std::endl;
-        return inlier_cloud;
+    const size_t inlier_n = d_compact_inliers_.size();
+    std::vector<GPUPoint3f> h_compact_inliers(inlier_n);
+    if (inlier_n > 0)
+    {
+        err = cudaMemcpy(h_compact_inliers.data(), thrust::raw_pointer_cast(d_compact_inliers_.data()),
+                           inlier_n * sizeof(GPUPoint3f), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess)
+        {
+            std::cerr << "[extractInlierCloud]  cudaMemcpy 失败: " << cudaGetErrorString(err) << std::endl;
+            return inlier_cloud;
+        }
     }
 
     // 转换为 PCL 点云
@@ -784,12 +810,21 @@ void QuadricDetect::validateInversePowerResults(int batch_size)
     int check_count = std::min(3, batch_size);
 
     // 1. 检查特征向量
-    thrust::host_vector<float> h_eigenvectors(check_count * 10);
-    thrust::copy_n(d_batch_eigenvectors_.begin(), check_count * 10, h_eigenvectors.begin());
+    const size_t ev_n = static_cast<size_t>(check_count) * 10u;
+    std::vector<float> h_eigenvectors(ev_n);
+    if (ev_n > 0)
+    {
+        cudaMemcpy(h_eigenvectors.data(), thrust::raw_pointer_cast(d_batch_eigenvectors_.data()),
+                   ev_n * sizeof(float), cudaMemcpyDeviceToHost);
+    }
 
     // 2. 检查生成的模型
-    thrust::host_vector<GPUQuadricModel> h_models(check_count);
-    thrust::copy_n(d_batch_models_.begin(), check_count, h_models.begin());
+    std::vector<GPUQuadricModel> h_models(static_cast<size_t>(check_count));
+    if (check_count > 0)
+    {
+        cudaMemcpy(h_models.data(), thrust::raw_pointer_cast(d_batch_models_.data()),
+                   static_cast<size_t>(check_count) * sizeof(GPUQuadricModel), cudaMemcpyDeviceToHost);
+    }
 
     bool all_valid = true;
 
@@ -1128,7 +1163,12 @@ void QuadricDetect::computeVisualizationMarkers(
     const std_msgs::Header &header,
     float grid_step,
     float alpha,
-    bool clip_to_hull) const
+    bool clip_to_hull,
+    bool use_concave_mesh,
+    double concave_alpha,
+    double delaunay_max_edge,
+    double sliver_max_edge_ratio,
+    bool clip_hull_vertices_inside) const
 {
     if (!primitive.has_visualization_data) {
         ROS_DEBUG("[computeVisualizationMarkers] skip: no visualization data");
@@ -1141,9 +1181,41 @@ void QuadricDetect::computeVisualizationMarkers(
     }
     
     ROS_DEBUG("[computeVisualizationMarkers] inliers=%zu", primitive.inliers->size());
+
+    if (use_concave_mesh) {
+        mesh_viz::MeshVizParams p;
+        p.use_concave_mesh = true;
+        p.concave_alpha = concave_alpha;
+        p.delaunay_max_edge = delaunay_max_edge;
+        p.sliver_max_edge_ratio = sliver_max_edge_ratio;
+        p.mesh_alpha = alpha;
+        p.clip_to_hull = clip_to_hull;
+        p.clip_hull_vertices_inside = clip_hull_vertices_inside;
+        visualization_msgs::Marker m;
+        if (mesh_viz::buildQuadricVisualizationMarker(primitive.inliers, primitive.explicit_coeffs,
+                                                      primitive.transform, header, p, m)) {
+            m.id = static_cast<int>(marker_array.markers.size());
+            marker_array.markers.push_back(m);
+            return;
+        }
+        ROS_WARN_THROTTLE(2.0, "[computeVisualizationMarkers] concave mesh failed, fallback to grid");
+    }
+
+    computeVisualizationMarkersLegacy(primitive, marker_array, header, grid_step, alpha, clip_to_hull);
+}
+
+void QuadricDetect::computeVisualizationMarkersLegacy(
+    const quadric::DetectedPrimitive &primitive,
+    visualization_msgs::MarkerArray &marker_array,
+    const std_msgs::Header &header,
+    float grid_step,
+    float alpha,
+    bool clip_to_hull) const
+{
+    ROS_DEBUG("[computeVisualizationMarkers] inliers=%zu (legacy path)", primitive.inliers->size());
     
     // ========================================
-    // 1. 2σ离群点剔除
+    // 1. 2σ 离群点剔除
     // ========================================
     std::vector<GPUPoint3f> local_points;
     std::vector<float> distances;

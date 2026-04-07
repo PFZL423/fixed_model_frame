@@ -43,8 +43,9 @@ __global__ void sampleAndBuildMatrices_Kernel(
     int batch_size,
     float *batch_matrices,
     GPUQuadricModel *batch_models,
-    float *batch_explicit_coeffs,  // 🆕 输出：显式系数 [batch_size × 6]
-    float *batch_transforms);      // 🆕 输出：变换矩阵 [batch_size × 12] (3x4)
+    float *batch_explicit_coeffs,
+    float *batch_transforms,
+    const int *voxel_ids);   // 新增：体素序号数组，nullptr=关闭体素约束
 
 /**
  * @brief 批量内点计数内核 - 2D并行验证（粗筛阶段，支持子采样）

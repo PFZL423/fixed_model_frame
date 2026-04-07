@@ -384,8 +384,9 @@ __global__ void sampleAndBuildMatrices_Kernel(
     int batch_size,
     float *batch_matrices,
     GPUQuadricModel *batch_models,
-    float *batch_explicit_coeffs,  // 🆕 输出：显式系数 [batch_size × 6]
-    float *batch_transforms)       // 🆕 输出：变换矩阵 [batch_size × 12] (3x4)
+    float *batch_explicit_coeffs,
+    float *batch_transforms,
+    const int *voxel_ids)   // 新增：每个点对应的体素序号（有序），nullptr=关闭
 {
     int model_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (model_id >= batch_size)
@@ -404,28 +405,42 @@ __global__ void sampleAndBuildMatrices_Kernel(
     sample_indices[0] = seed_idx;  // 第一个点是锚点
 
     // 第二步：定义局部搜索窗口
-    int range = (int)(0.01f * num_remaining);
-    int low = max(0, seed_pos - range);
-    int high = min(num_remaining - 1, seed_pos + range);
-    int window_size = high - low + 1;
+    int low, high, window_size;
+    if (voxel_ids != nullptr)
+    {
+        // 方案C：按体素ID约束窗口（体素有序，相邻体素ID差≤1）
+        int seed_voxel = voxel_ids[seed_pos];
+        // 二分搜索找到体素ID范围 [seed_voxel-1, seed_voxel+1] 的边界
+        // 由于 voxel_ids 单调不减，直接线性扫描窗口即可（点数有限）
+        low = seed_pos;
+        while (low > 0 && abs(voxel_ids[low - 1] - seed_voxel) <= 1) --low;
+        high = seed_pos;
+        while (high < num_remaining - 1 && abs(voxel_ids[high + 1] - seed_voxel) <= 1) ++high;
+        window_size = high - low + 1;
+    }
+    else
+    {
+        // 原始方案：按索引位置1%窗口
+        int range = (int)(0.01f * num_remaining);
+        low = max(0, seed_pos - range);
+        high = min(num_remaining - 1, seed_pos + range);
+        window_size = high - low + 1;
+    }
 
     // 第三步：窗口内伙伴采样（5个点）
     int partner_count = 0;
-    int max_attempts = 100;  // 防止无限循环
+    int max_attempts = 100;
     int attempts = 0;
 
     while (partner_count < 5 && attempts < max_attempts)
     {
         attempts++;
-        // 在窗口内随机选择一个位置
         int candidate_pos = low + (curand(&local_state) % window_size);
-        
-        // 强制约束：跳过Z轴方向过度密集的邻近点
+
         if (abs(candidate_pos - seed_pos) > 3)
         {
             int candidate_idx = remaining_indices[candidate_pos];
-            
-            // 检查是否重复（简单检查）
+
             bool is_duplicate = false;
             for (int j = 0; j <= partner_count; ++j)
             {
@@ -435,7 +450,7 @@ __global__ void sampleAndBuildMatrices_Kernel(
                     break;
                 }
             }
-            
+
             if (!is_duplicate)
             {
                 partner_count++;
@@ -1098,6 +1113,16 @@ GPUPoint3f* QuadricDetect::getPointsPtr() const
     }
 }
 
+void QuadricDetect::clearDeviceQuadricBatchVectors(bool also_remaining_indices)
+{
+    d_batch_inlier_counts_.clear();
+    d_batch_models_.clear();
+    d_best_model_index_.clear();
+    d_best_model_count_.clear();
+    if (also_remaining_indices)
+        d_remaining_indices_.clear();
+}
+
 void QuadricDetect::initializeGPUMemory(int batch_size)
 {
     // 分配GPU内存
@@ -1327,8 +1352,9 @@ void QuadricDetect::launchSampleAndBuildMatrices(int batch_size)
         batch_size,
         thrust::raw_pointer_cast(d_batch_matrices_.data()),
         thrust::raw_pointer_cast(d_batch_models_.data()),
-        thrust::raw_pointer_cast(d_batch_explicit_coeffs_.data()),  // 🆕 显式系数缓冲区
-        thrust::raw_pointer_cast(d_batch_transforms_.data()));       // 🆕 变换矩阵缓冲区
+        thrust::raw_pointer_cast(d_batch_explicit_coeffs_.data()),
+        thrust::raw_pointer_cast(d_batch_transforms_.data()),
+        d_voxel_ids_.empty() ? nullptr : thrust::raw_pointer_cast(d_voxel_ids_.data()));
 
     cudaError_t kernel_error = cudaGetLastError();
     if (kernel_error != cudaSuccess)
@@ -2326,6 +2352,14 @@ void QuadricDetect::gatherRemainingToCompact() const
             d_compact_inliers_.begin()
         );
     }
-    
+
     cudaStreamSynchronize(stream_);
+}
+
+void QuadricDetect::setVoxelIds(const std::vector<int>& voxel_ids)
+{
+    if (voxel_ids.empty())
+        d_voxel_ids_.clear();
+    else
+        d_voxel_ids_.assign(voxel_ids.begin(), voxel_ids.end());
 }

@@ -203,13 +203,26 @@ public:
     bool processCloudDirect(GPUPoint3f* d_points, size_t count);
 
     /**
+     * @brief 设置体素序号数组（方案C：体素约束采样）
+     * 必须在 processCloudDirect 之前调用。
+     * 传入空 vector 则关闭体素约束。
+     */
+    void setVoxelIds(const std::vector<int>& voxel_ids);
+
+
+    /**
      * @brief 计算二次曲面的可视化Marker（惰性触发）
      * @param primitive 检测到的二次曲面基元（必须包含可视化数据）
      * @param marker_array [out] 输出的Marker数组
      * @param header ROS消息头
      * @param grid_step 网格步长（米）
      * @param alpha 透明度 [0,1]
-     * @param clip_to_hull 是否裁剪到凸包边界
+     * @param clip_to_hull 是否裁剪到凹/凸包边界
+     * @param use_concave_mesh 为 true 时优先使用凹包+Delaunay+colormap（失败则回退网格）
+     * @param concave_alpha PCL ConcaveHull alpha（米）
+     * @param delaunay_max_edge Delaunay 三角形最大边长（米）
+     * @param sliver_max_edge_ratio 最长边/最短边上限，剔除细长三角；≤0 关闭
+     * @param clip_hull_vertices_inside true：凹包裁剪要求三顶点均在凹包内；false：仅重心在内（旧行为）
      */
     void computeVisualizationMarkers(
         const quadric::DetectedPrimitive &primitive,
@@ -217,9 +230,23 @@ public:
         const std_msgs::Header &header,
         float grid_step = 0.1f,
         float alpha = 0.65f,
-        bool clip_to_hull = true) const;
+        bool clip_to_hull = true,
+        bool use_concave_mesh = true,
+        double concave_alpha = 0.08,
+        double delaunay_max_edge = 2.0,
+        double sliver_max_edge_ratio = 28.0,
+        bool clip_hull_vertices_inside = true) const;
 
 private:
+    /// 旧版：σ+凸包+规则网格（凹包失败时回退）
+    void computeVisualizationMarkersLegacy(
+        const quadric::DetectedPrimitive &primitive,
+        visualization_msgs::MarkerArray &marker_array,
+        const std_msgs::Header &header,
+        float grid_step,
+        float alpha,
+        bool clip_to_hull) const;
+
     // 添加这个新函数的声明
     void validateInversePowerResults(int batch_size);
     void outputBestModelDetails(const GPUQuadricModel &best_model, int inlier_count, int model_idx, int iteration);
@@ -229,6 +256,8 @@ private:
     // GPU 辅助函数：在 .cu 文件中实现
     void gatherInliersToCompact() const;  // 将内点聚集到 d_compact_inliers_
     void gatherRemainingToCompact() const; // 将剩余点聚集到 d_compact_inliers_
+    /// 清空批处理相关 device_vector（.cu 中实现；g++ 编译 .cpp 时 device_vector::clear() 会链到未解析的 thrust::cuda_cub::copy）
+    void clearDeviceQuadricBatchVectors(bool also_remaining_indices);
     // 🆕 添加到QuadricDetect.h的public部分
     void performBatchInversePowerIteration(int batch_size);
     void launchComputeATA(int batch_size);
@@ -256,8 +285,9 @@ private:
     thrust::device_vector<GPUQuadricModel> d_batch_models_; ///< 批量拟合的二次曲面模型
     thrust::device_vector<int> d_batch_inlier_counts_;     ///< 每个模型的内点计数
     thrust::device_vector<curandState> d_rand_states_;     ///< GPU随机数生成器状态
-    thrust::device_vector<float> d_batch_explicit_coeffs_; ///< 🆕 批量显式系数 [batch_size × 6]
-    thrust::device_vector<float> d_batch_transforms_;      ///< 🆕 批量变换矩阵 [batch_size × 12] (3x4)
+    thrust::device_vector<float> d_batch_explicit_coeffs_; ///< 批量显式系数 [batch_size × 6]
+    thrust::device_vector<float> d_batch_transforms_;      ///< 批量变换矩阵 [batch_size × 12] (3x4)
+    thrust::device_vector<int>   d_voxel_ids_;             ///< 体素序号（与点云对齐，有序），空=关闭体素约束
     
     // 存储最优结果
     thrust::device_vector<int> d_best_model_index_;        ///< 最优模型在batch中的索引
