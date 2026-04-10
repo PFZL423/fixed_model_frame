@@ -565,7 +565,8 @@ private:
                             viz_concave_alpha_,
                             viz_delaunay_max_edge_,
                             viz_sliver_max_edge_ratio_,
-                            viz_clip_hull_vertices_);
+                            viz_clip_hull_vertices_,
+                            static_cast<int>(i));
                     } else {
                         ROS_WARN("Quadric %zu: no visualization data, skip marker", i + 1);
                     }

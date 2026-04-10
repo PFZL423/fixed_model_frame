@@ -1168,7 +1168,8 @@ void QuadricDetect::computeVisualizationMarkers(
     double concave_alpha,
     double delaunay_max_edge,
     double sliver_max_edge_ratio,
-    bool clip_hull_vertices_inside) const
+    bool clip_hull_vertices_inside,
+    int color_index) const
 {
     if (!primitive.has_visualization_data) {
         ROS_DEBUG("[computeVisualizationMarkers] skip: no visualization data");
@@ -1191,6 +1192,30 @@ void QuadricDetect::computeVisualizationMarkers(
         p.mesh_alpha = alpha;
         p.clip_to_hull = clip_to_hull;
         p.clip_hull_vertices_inside = clip_hull_vertices_inside;
+
+        // pastel 纯色：黄金角步进，低饱和高亮度，与平面调色板错开 60°
+        if (color_index >= 0)
+        {
+            float h = std::fmod(color_index * 137.508f + 60.f, 360.f);
+            // HSV → RGB（内联，s=0.35 v=0.95）
+            float s = 0.35f, v = 0.95f;
+            float c_hsv = v * s;
+            float x_hsv = c_hsv * (1.f - std::fabs(std::fmod(h / 60.f, 2.f) - 1.f));
+            float m = v - c_hsv;
+            float r1, g1, b1;
+            int sector = static_cast<int>(h / 60.f) % 6;
+            switch (sector) {
+                case 0: r1=c_hsv; g1=x_hsv; b1=0; break;
+                case 1: r1=x_hsv; g1=c_hsv; b1=0; break;
+                case 2: r1=0; g1=c_hsv; b1=x_hsv; break;
+                case 3: r1=0; g1=x_hsv; b1=c_hsv; break;
+                case 4: r1=x_hsv; g1=0; b1=c_hsv; break;
+                default: r1=c_hsv; g1=0; b1=x_hsv; break;
+            }
+            std_msgs::ColorRGBA fc;
+            fc.r = r1 + m; fc.g = g1 + m; fc.b = b1 + m; fc.a = alpha;
+            p.flat_color = fc;
+        }
         visualization_msgs::Marker m;
         if (mesh_viz::buildQuadricVisualizationMarker(primitive.inliers, primitive.explicit_coeffs,
                                                       primitive.transform, header, p, m)) {

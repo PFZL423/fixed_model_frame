@@ -274,6 +274,8 @@ bool buildQuadricVisualizationMarker(const pcl::PointCloud<pcl::PointXYZI>::Cons
     marker_out.scale.x = marker_out.scale.y = marker_out.scale.z = 1.0;
     marker_out.color.a = params.mesh_alpha;
 
+    bool use_flat = (params.flat_color.a > 0.f);
+
     size_t idx = 0;
     for (const auto &t : tris)
     {
@@ -284,11 +286,18 @@ bool buildQuadricVisualizationMarker(const pcl::PointCloud<pcl::PointXYZI>::Cons
             geometry_msgs::Point p;
             p.x = g.x; p.y = g.y; p.z = g.z;
             marker_out.points.push_back(p);
-            double sm = std::max(0.0, std::min(1.0, (scalars[idx] - smin) / (double)sden));
-            tinycolormap::Color tc = tinycolormap::GetColor(sm, tinycolormap::ColormapType::Plasma);
-            std_msgs::ColorRGBA c;
-            c.r = tc.r(); c.g = tc.g(); c.b = tc.b(); c.a = params.mesh_alpha;
-            marker_out.colors.push_back(c);
+            if (use_flat)
+            {
+                marker_out.colors.push_back(params.flat_color);
+            }
+            else
+            {
+                double sm = std::max(0.0, std::min(1.0, (scalars[idx] - smin) / (double)sden));
+                tinycolormap::Color tc = tinycolormap::GetColor(sm, tinycolormap::ColormapType::Plasma);
+                std_msgs::ColorRGBA c;
+                c.r = tc.r(); c.g = tc.g(); c.b = tc.b(); c.a = params.mesh_alpha;
+                marker_out.colors.push_back(c);
+            }
             ++idx;
         }
     }

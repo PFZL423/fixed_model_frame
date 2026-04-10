@@ -235,7 +235,8 @@ public:
         double concave_alpha = 0.08,
         double delaunay_max_edge = 2.0,
         double sliver_max_edge_ratio = 28.0,
-        bool clip_hull_vertices_inside = true) const;
+        bool clip_hull_vertices_inside = true,
+        int color_index = -1) const;
 
 private:
     /// 旧版：σ+凸包+规则网格（凹包失败时回退）
