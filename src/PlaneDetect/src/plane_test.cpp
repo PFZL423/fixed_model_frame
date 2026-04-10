@@ -641,7 +641,8 @@ private:
     /// 凹包 + Delaunay 平面三角网（与 generatePlaneVisualizationHull 共用 (u,v) 基）
     bool tryPlaneConcaveMesh(const DetectedPrimitive<pcl::PointXYZI> &plane,
                              const std_msgs::Header &header,
-                             visualization_msgs::Marker &marker)
+                             visualization_msgs::Marker &marker,
+                             const std_msgs::ColorRGBA &flat_color = std_msgs::ColorRGBA{})
     {
         if (!plane.inliers || plane.inliers->size() < 3)
             return false;
@@ -668,12 +669,13 @@ private:
 
         mesh_viz::MeshVizParams p;
         p.use_concave_mesh = true;
-        p.concave_alpha = viz_concave_alpha_;
+        p.concave_alpha = 0.0;  // 0 = 自适应 0.005*bbox_diagonal
         p.delaunay_max_edge = viz_delaunay_max_edge_;
         p.sliver_max_edge_ratio = viz_sliver_max_edge_ratio_;
         p.mesh_alpha = static_cast<float>(plane_alpha_);
         p.clip_to_hull = plane_clip_to_hull_;
         p.clip_hull_vertices_inside = viz_clip_hull_vertices_;
+        p.flat_color = flat_color;
 
         std_msgs::Header h = header;
         h.frame_id = output_frame_;
@@ -738,12 +740,17 @@ private:
             plane_marker.action = visualization_msgs::Marker::ADD;
 
             // 计算平面的可视化网格（优先凹包+Delaunay，否则单调链凸包+网格，再回退矩形）
+            auto base = chooseColor(i);
+            std_msgs::ColorRGBA flat_c;
+            flat_c.r = base[0]; flat_c.g = base[1]; flat_c.b = base[2];
+            flat_c.a = static_cast<float>(std::max(0.0, std::min(1.0, plane_alpha_)));
+
             bool hull_done = false;
             if (plane_clip_to_hull_)
             {
                 if (viz_use_concave_mesh_)
                 {
-                    hull_done = tryPlaneConcaveMesh(plane, header, plane_marker);
+                    hull_done = tryPlaneConcaveMesh(plane, header, plane_marker, flat_c);
                 }
                 if (!hull_done)
                 {
@@ -756,21 +763,20 @@ private:
                 generatePlaneVisualization(plane, plane_marker);
             }
 
-            // 设置颜色（更美观的配色与透明度）；凹包网格已带逐顶点 colors 时跳过底色
-            auto base = chooseColor(i);
+            // 设置颜色：flat_color 已填入 colors 数组时，marker.color 设为白色（乘法单位元）；否则用 base 色
             if (plane_marker.colors.empty())
             {
                 plane_marker.color.r = base[0];
                 plane_marker.color.g = base[1];
                 plane_marker.color.b = base[2];
-                plane_marker.color.a = static_cast<float>(std::max(0.0, std::min(1.0, plane_alpha_)));
+                plane_marker.color.a = flat_c.a;
             }
             else
             {
                 plane_marker.color.r = 1.0f;
                 plane_marker.color.g = 1.0f;
                 plane_marker.color.b = 1.0f;
-                plane_marker.color.a = static_cast<float>(std::max(0.0, std::min(1.0, plane_alpha_)));
+                plane_marker.color.a = flat_c.a;
             }
 
             plane_marker.scale.x = 1.0;
