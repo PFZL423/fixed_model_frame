@@ -24,7 +24,7 @@ plane_color_scheme: "pastel"
 # 是否对平面三角网格应用棋盘式交替着色，增强纹理感
 plane_checkerboard: true
 # 平面透明度 [0,1]
-plane_alpha: 0.75
+plane_alpha: 1.0
 # 可视化网格密度（越大越细，20≈默认，建议范围 8~60）
 plane_grid_size: 24
 
@@ -38,7 +38,7 @@ plane_hull_padding: 0.02
 # PlaneDetect算法核心参数
 min_remaining_points_percentage: 0.03 # 剩余点数阈值(相对于总点数)
 plane_distance_threshold: 0.08 # 平面内点距离阈值 (m)
-min_plane_inlier_count_absolute: 20000 # 有效模型的最小内点数(绝对值)
+min_plane_inlier_count_absolute: 5000 # 有效模型的最小内点数(绝对值)
 plane_max_iterations: 1000 # RANSAC最大迭代次数
 min_plane_inlier_percentage: 0.05 # 有效模型的最小内点比例
 batch_size: 512 # GPU批处理大小
@@ -60,10 +60,11 @@ enable_quadric_visualization: true
 
 # 凹包 + Delaunay 网格（平面/二次曲面共用；失败自动回退旧网格）
 viz_use_concave_mesh: true
-# PCL ConcaveHull alpha（米），过小易失败
-viz_concave_alpha: 0.08
-# Delaunay 三角形最大边长（米），抑制跨空长边
-viz_delaunay_max_edge: 0.8
+# Alpha Shape 半径（米）；0 = 自动从点间距估算（推荐）
+viz_concave_alpha: 0.0
+# Delaunay 三角形最大边长（米），抑制跨空长边；同时作为 Alpha Shape 外接圆上限
+# 减小此值可使凹形边界贴合更紧（不影响内部密集三角，不产生孔洞）
+viz_delaunay_max_edge: 0.2
 # 最长边/最短边比上限，剔除细长三角（边缘毛刺）；≤0 关闭；略降更严（如 22），略升更松（如 36）
 viz_sliver_max_edge_ratio: 36.0
 # 凹包裁剪：true=三顶点均在凹包内（默认，边缘更整）；false=仅重心在内（旧行为，凹边界易穿孔）
@@ -76,7 +77,7 @@ min_remaining_points_for_quadric: 20000 # 二次曲面检测的最小点数阈�
 # QuadricDetect算法参数
 quadric_min_remaining_points_percentage: 0.1 # 剩余点数阈值(相对于总点数)
 quadric_distance_threshold: 0.10 # 二次曲面内点距离阈值 (m)
-min_quadric_inlier_count_absolute: 8000 # 有效模型的最小内点数(绝对值)
+min_quadric_inlier_count_absolute: 60000 # 有效模型的最小内点数(绝对值)
 quadric_max_iterations: 300 # RANSAC最大迭代次数（降低负载）
 min_quadric_inlier_percentage: 0.05 # 有效模型的最小内点比例
 quadric_verbosity: 0 # 0=静默 1=每帧一行摘要 2=迭代/采样详细日志

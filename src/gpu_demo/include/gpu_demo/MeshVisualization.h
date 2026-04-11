@@ -22,7 +22,7 @@ struct MeshVizParams
     /// Delaunay 三角形最大边长（米），过大则丢弃
     double delaunay_max_edge = 2.0;
     /// 最长边 / 最短边 上限，剔除细长三角；≤0 关闭
-    double sliver_max_edge_ratio = 28.0;
+    double sliver_max_edge_ratio = 0.0;  // ≤0 关闭；可视化场景无需剔除细长三角
     /// Marker 整体透明度 [0,1]
     float mesh_alpha = 0.7f;
     /// 保留兼容字段（Alpha Shape 不再需要，但调用方可能仍设置）

@@ -186,6 +186,17 @@ static bool triangulateConcaveDelaunay(const std::vector<cv::Point2f> &pts2d,
     std::vector<cv::Vec6f> tri_list;
     subdiv.getTriangleList(tri_list);
 
+    // 自动模式：直接用 max_edge 作为外接圆半径上限。
+    // 百分位估算在密度极不均匀的 LiDAR 场景（稀疏区被密集区主导）会持续低估，
+    // 导致稀疏区三角形被过滤产生孔洞。改为 max_edge 后：
+    //   - 正常三角形（外接圆 << max_edge）全部保留
+    //   - 仅过滤外接圆 > max_edge 的高度退化三角形（边长很小但极钝角）
+    //   - 边界控制由下方的 edgeMax > max_edge 独立负责
+    if (concave_alpha <= 1e-9)
+    {
+        alpha_r = static_cast<float>(max_edge);
+    }
+
     for (const auto &t : tri_list)
     {
         float x1 = t[0], y1 = t[1];

@@ -113,7 +113,7 @@ private:
     bool viz_use_concave_mesh_ = true;
     double viz_concave_alpha_ = 0.08;
     double viz_delaunay_max_edge_ = 2.0;
-    double viz_sliver_max_edge_ratio_ = 28.0;
+    double viz_sliver_max_edge_ratio_ = 0.0;
     bool viz_clip_hull_vertices_ = true;
     
     // 🆕 二次曲面可视化参数
@@ -566,7 +566,7 @@ private:
                             viz_delaunay_max_edge_,
                             viz_sliver_max_edge_ratio_,
                             viz_clip_hull_vertices_,
-                            static_cast<int>(i));
+                            std::rand());
                     } else {
                         ROS_WARN("Quadric %zu: no visualization data, skip marker", i + 1);
                     }
@@ -717,12 +717,10 @@ private:
             return std::array<float,3>{c[0], c[1], c[2]};
         };
 
-        auto chooseColor = [&](size_t i){
-            if (plane_color_scheme_ == "tab10") return tab10(i);
-            // hsv/pastel: 使用现有 hsvToRgb，并调饱和度
-            float hue = (float)i / std::max<size_t>(1, planes.size()) * 360.0f;
+        auto chooseColor = [&](){
+            if (plane_color_scheme_ == "tab10") return tab10(std::rand());
+            float hue = static_cast<float>(std::rand() % 360);
             if (plane_color_scheme_ == "hsv") return hsvToRgb(hue, 0.9f, 0.95f);
-            // pastel 默认：低饱和高明度
             return hsvToRgb(hue, 0.35f, 0.95f);
         };
 
@@ -741,7 +739,7 @@ private:
             plane_marker.action = visualization_msgs::Marker::ADD;
 
             // 计算平面的可视化网格（优先凹包+Delaunay，否则单调链凸包+网格，再回退矩形）
-            auto base = chooseColor(i);
+            auto base = chooseColor();
             std_msgs::ColorRGBA flat_c;
             flat_c.r = base[0]; flat_c.g = base[1]; flat_c.b = base[2];
             flat_c.a = static_cast<float>(std::max(0.0, std::min(1.0, plane_alpha_)));
