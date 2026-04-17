@@ -248,10 +248,6 @@ private:
         float alpha,
         bool clip_to_hull) const;
 
-    // 添加这个新函数的声明
-    void validateInversePowerResults(int batch_size);
-    void outputBestModelDetails(const GPUQuadricModel &best_model, int inlier_count, int model_idx, int iteration);
-
     pcl::PointCloud<pcl::PointXYZI>::Ptr extractInlierCloud() const;
     
     // GPU 辅助函数：在 .cu 文件中实现
@@ -259,13 +255,6 @@ private:
     void gatherRemainingToCompact() const; // 将剩余点聚集到 d_compact_inliers_
     /// 清空批处理相关 device_vector（.cu 中实现；g++ 编译 .cpp 时 device_vector::clear() 会链到未解析的 thrust::cuda_cub::copy）
     void clearDeviceQuadricBatchVectors(bool also_remaining_indices);
-    // 🆕 添加到QuadricDetect.h的public部分
-    void performBatchInversePowerIteration(int batch_size);
-    void launchComputeATA(int batch_size);
-    void launchBatchQR(int batch_size);
-    void launchBatchInversePower(int batch_size);
-    void launchExtractQuadricModels(int batch_size);
-
     // 添加临时存储成员变量
     mutable thrust::device_vector<int> d_temp_inlier_indices_;
     mutable int current_inlier_count_;
@@ -293,12 +282,6 @@ private:
     // 存储最优结果
     thrust::device_vector<int> d_best_model_index_;        ///< 最优模型在batch中的索引
     thrust::device_vector<int> d_best_model_count_;        ///< 最优模型的内点数
-
-    // 反幂迭代所需的额外GPU内存
-
-    thrust::device_vector<float> d_batch_ATA_matrices_; // 1024个10×10的A^T*A矩阵
-    thrust::device_vector<float> d_batch_R_matrices_;   // 1024个10×10的R矩阵(QR分解)
-    thrust::device_vector<float> d_batch_eigenvectors_; // 1024个10维特征向量
 
     // 两阶段RANSAC竞速相关（参考平面检测）
     thrust::device_vector<int> d_indices_full_;       ///< 完整索引序列（用于排序，预分配batch_size）
@@ -358,13 +341,6 @@ private:
      * 流程：批量采样 → 批量SVD → 批量验证 → 最优选择 → LO-RANSAC精炼
      */
     void findQuadrics_BatchGPU();
-    
-    /**
-     * @brief LO-RANSAC局部优化精炼 (🚧待实现)
-     * @param best_model [in/out] 待精炼的最优模型
-     * @param best_inlier_count [in/out] 对应的内点数
-     */
-    void performLO_RANSAC(GPUQuadricModel &best_model, int &best_inlier_count);
     
     
 
@@ -456,9 +432,4 @@ private:
      * @param indices_to_remove 需要移除的点的全局索引列表
      */
     void removeFoundPoints(const std::vector<int> &indices_to_remove);
-    
-    /**
-     * @brief 使用PCL进行平面检测 (可选的后处理步骤)
-     */
-    void findPlanes_PCL();
 };

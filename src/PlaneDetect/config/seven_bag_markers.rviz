@@ -7,7 +7,7 @@ Panels:
         - /Global Options1
         - /PCDBackground1
       Splitter Ratio: 0.5
-    Tree Height: 1051
+    Tree Height: 2028
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
@@ -60,7 +60,7 @@ Visualization Manager:
       Color: 200; 200; 255
       Color Transformer: Intensity
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -75,7 +75,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Class: rviz/MarkerArray
       Enabled: true
       Marker Topic: /bag1/plane_markers
@@ -148,7 +148,8 @@ Visualization Manager:
       Marker Topic: /bag5/plane_markers
       Name: Bag5 PlaneMarkers
       Namespaces:
-        {}
+        normals: true
+        planes: true
       Queue Size: 100
       Value: true
     - Class: rviz/MarkerArray
@@ -156,7 +157,7 @@ Visualization Manager:
       Marker Topic: /bag5/quadric_markers
       Name: Bag5 QuadricMarkers
       Namespaces:
-        quadric_surfaces: true
+        {}
       Queue Size: 100
       Value: true
     - Class: rviz/MarkerArray
@@ -176,9 +177,26 @@ Visualization Manager:
         {}
       Queue Size: 100
       Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /bag7/plane_markers
+      Name: Bag7 PlaneMarkers
+      Namespaces:
+        normals: true
+        planes: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /bag7/quadric_markers
+      Name: Bag7 QuadricMarkers
+      Namespaces:
+        quadric_surfaces: true
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
-    Background Color: 48; 48; 52
+    Background Color: 243; 243; 243
     Default Light: true
     Fixed Frame: map
     Frame Rate: 30
@@ -194,7 +212,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 7.277675628662109
+      Distance: 7.050464630126953
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -210,25 +228,25 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.24000021815299988
+      Pitch: 0.30000007152557373
       Target Frame: <Fixed Frame>
-      Yaw: 2.8154008388519287
+      Yaw: 2.7653963565826416
     Saved: ~
 Window Geometry:
   Displays:
-    collapsed: true
+    collapsed: false
   Height: 2432
-  Hide Left Dock: true
+  Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd000000010000000000000950000008e4fc0200000005fb000000100044006900730070006c006100790073000000006e000005130000018200fffffffb0000001200530065006c0065006300740069006f006e000000058d000000b0000000b000fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000649000000b0000000b000fffffffb0000000a005600690065007700730000000705000001890000013200fffffffb0000000800540069006d0065000000089a000000b80000005e00ffffff00000f70000008e400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd000000010000000000000362000008e4fc0200000005fb000000100044006900730070006c006100790073010000006e000008e40000018200fffffffb0000001200530065006c0065006300740069006f006e00000005e4000000b0000000b000fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000663000000c0000000b000fffffffb0000000a0056006900650077007300000006fa0000016f0000013200fffffffb0000000800540069006d00650000000849000001090000005e00ffffff00000c02000008e400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
-    collapsed: true
+    collapsed: false
   Time:
-    collapsed: true
+    collapsed: false
   Tool Properties:
-    collapsed: true
+    collapsed: false
   Views:
-    collapsed: true
+    collapsed: false
   Width: 3952
   X: 144
   Y: 54

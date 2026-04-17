@@ -174,16 +174,6 @@ target_link_libraries(test_preprocess_node
 )
 add_dependencies(test_preprocess_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
-# 🆕 新增：法线计算测试节点 - 测试空间哈希法线计算
-add_executable(normal_test src/normal_test.cpp)
-target_link_libraries(normal_test
-  gpu_preprocessor_lib
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  ${CUDA_LIBRARIES}
-)
-add_dependencies(normal_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-
 #############
 ## Install ##
 #############
@@ -195,7 +185,6 @@ install(TARGETS
   gpu_check_node
   # demo_test  # 已禁用
   test_preprocess_node
-  normal_test
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

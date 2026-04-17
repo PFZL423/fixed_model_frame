@@ -219,14 +219,7 @@ void GPUPreprocessor::preprocessOnGPU(const PreprocessConfig &config)
         cuda_launchGroundRemoval(config.ground_threshold);
     }
 
-    // // Step 4: 法线估计 (根据开关决定)
-    // if (config.compute_normals)
-    // {
-    //     auto start = std::chrono::high_resolution_clock::now();
-    //     launchNormalEstimation(config.normal_radius, config.normal_k);
-    //     auto end = std::chrono::high_resolution_clock::now();
-    //     last_stats_.normal_estimation_time_ms = std::chrono::duration<float, std::milli>(end - start).count();
-    // }
+    // Step 4: 法线估计已移除
 }
 
 ProcessingResult GPUPreprocessor::createResult(const PreprocessConfig &config)
@@ -236,12 +229,6 @@ ProcessingResult GPUPreprocessor::createResult(const PreprocessConfig &config)
 
     result.setPointsRef(&d_output_points_);
     result.setPointCount(final_point_count);
-
-    // if (config.compute_normals)
-    // {
-    //     result.setPointsNormalRef(&d_output_points_normal_);
-    // }
-
     return result;
 }
 
@@ -252,32 +239,6 @@ size_t GPUPreprocessor::getCurrentPointCount() const
 
 // ========== 算法包装函数 (调用.cu中的实现) ==========
 
-
-// ========== 修改launchNormalEstimation函数 ==========
-void GPUPreprocessor::launchNormalEstimation(float radius, int k)
-{
-    // std::cout << "[GPUPreprocessor] Starting normal estimation" << std::endl;
-
-    // size_t point_count = d_temp_points_.size();
-    // if (point_count == 0)
-    //     return;
-
-    // // ✅ 避开resize，用clear+reserve+手动构造
-    // d_output_points_normal_.clear();
-    // d_output_points_normal_.reserve(point_count);
-
-    // // 创建临时的host_vector来构造数据
-    // std::vector<GPUPointNormal3f> h_temp(point_count);
-    // d_output_points_normal_ = h_temp; // 通过赋值避免resize
-
-    // // 调用.cu文件中的CUDA实现
-    // cuda_performNormalEstimation(
-    //     thrust::raw_pointer_cast(d_temp_points_.data()),
-    //     thrust::raw_pointer_cast(d_output_points_normal_.data()),
-    //     point_count, radius, k);
-
-    // std::cout << "[GPUPreprocessor] Normal estimation completed for " << point_count << " points" << std::endl;
-}
 
 
 // ========== 工具函数实现 ==========
@@ -301,37 +262,6 @@ std::vector<GPUPoint3f> ProcessingResult::downloadPoints() const
     if (err != cudaSuccess)
         return {};
     return out;
-}
-
-std::vector<GPUPointNormal3f> ProcessingResult::downloadPointsWithNormals() const
-{
-    // // if (!d_points_normal_)
-    // //     return {};
-
-    // // thrust::host_vector<GPUPointNormal3f> host_points = *d_points_normal_;
-    // // return std::vector<GPUPointNormal3f>(host_points.begin(), host_points.end());
-    // if (!has_normals_ || !d_points_normal_ || point_count_ == 0)
-    // {
-    //     return {};
-    // }
-
-    // // 使用 cudaMemcpy 替代 thrust::copy
-    // std::vector<GPUPointNormal3f> result(point_count_);
-
-    // cudaError_t error = cudaMemcpy(
-    //     result.data(),                                      // 目标：CPU内存
-    //     thrust::raw_pointer_cast(d_points_normal_->data()), // 源：GPU内存
-    //     point_count_ * sizeof(GPUPointNormal3f),            // 大小
-    //     cudaMemcpyDeviceToHost                              // 方向
-    // );
-
-    // if (error != cudaSuccess)
-    // {
-    //     throw std::runtime_error("CUDA memcpy failed: " + std::string(cudaGetErrorString(error)));
-    // }
-
-    // return result;
-    return {};  // 临时返回空向量，功能已禁用
 }
 
 size_t GPUPreprocessor::convertPCLToGPU(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cpu_cloud)
